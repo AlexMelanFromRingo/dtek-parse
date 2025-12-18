@@ -7,75 +7,168 @@ DTEK Power Outage Schedule Parser
 import re
 import json
 import requests
-from bs4 import BeautifulSoup
+import time
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 import sys
+import argparse
 
 
 class DTEKParser:
     """Парсер для отримання графіків відключень з сайту ДТЕК"""
 
-    def __init__(self, base_url: str = "https://www.dtek-dnem.com.ua/ua/shutdowns"):
+    def __init__(self, base_url: str = "https://www.dtek-dnem.com.ua/ua/shutdowns", debug: bool = False):
         self.base_url = base_url
+        self.debug = debug
         self.session = requests.Session()
+
+        # Більш реалістичні headers як у справжнього браузера
         self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+            'Accept-Language': 'uk-UA,uk;q=0.9,en-US;q=0.8,en;q=0.7',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Sec-Fetch-User': '?1',
+            'Cache-Control': 'max-age=0',
         })
+
         self.streets_data = {}
         self.fact_data = {}
         self.preset_data = {}
         self.ajax_url = None
 
-    def fetch_page(self) -> str:
-        """Завантажує HTML сторінку з графіками"""
-        try:
-            response = self.session.get(self.base_url, timeout=30)
-            response.raise_for_status()
-            return response.text
-        except requests.RequestException as e:
-            raise Exception(f"Помилка при завантаженні сторінки: {e}")
+    def fetch_page(self, retry: int = 3, delay: float = 2.0) -> str:
+        """Завантажує HTML сторінку з графіками з ретраями"""
+        for attempt in range(retry):
+            try:
+                if self.debug:
+                    print(f"🔄 Спроба {attempt + 1}/{retry} завантаження сторінки...")
+
+                # Додаємо затримку між спробами для більш "людської" поведінки
+                if attempt > 0:
+                    time.sleep(delay * attempt)
+
+                response = self.session.get(self.base_url, timeout=30)
+                response.raise_for_status()
+
+                if self.debug:
+                    print(f"✅ Сторінка завантажена ({len(response.text)} байт)")
+                    print(f"📝 Status code: {response.status_code}")
+                    print(f"🍪 Cookies: {dict(response.cookies)}")
+
+                return response.text
+
+            except requests.RequestException as e:
+                if self.debug:
+                    print(f"❌ Помилка при спробі {attempt + 1}: {e}")
+
+                if attempt == retry - 1:
+                    raise Exception(f"Не вдалося завантажити сторінку після {retry} спроб: {e}")
+
+        return ""
+
+    def save_html_debug(self, html: str, filename: str = "debug_page.html"):
+        """Зберігає HTML для діагностики"""
+        with open(filename, 'w', encoding='utf-8') as f:
+            f.write(html)
+        print(f"💾 HTML збережено в {filename} для діагностики")
 
     def extract_javascript_data(self, html: str) -> None:
         """Витягує дані з JavaScript змінних DisconSchedule"""
+
+        if self.debug:
+            print("\n🔍 Пошук JavaScript даних...")
+
         # Витягуємо DisconSchedule.streets
         streets_pattern = r'DisconSchedule\.streets\s*=\s*(\{[^;]+\});'
         streets_match = re.search(streets_pattern, html, re.DOTALL)
+
         if streets_match:
             try:
-                self.streets_data = json.loads(streets_match.group(1))
+                streets_json = streets_match.group(1)
+                self.streets_data = json.loads(streets_json)
+
+                if self.debug:
+                    print(f"✅ DisconSchedule.streets знайдено: {len(self.streets_data)} міст")
+                    print(f"   Перші 5 міст: {list(self.streets_data.keys())[:5]}")
             except json.JSONDecodeError as e:
-                print(f"Помилка парсингу streets: {e}")
+                print(f"❌ Помилка парсингу streets: {e}")
+                if self.debug:
+                    print(f"   JSON: {streets_json[:200]}...")
+        else:
+            print("⚠️ DisconSchedule.streets не знайдено в HTML")
+            if self.debug:
+                # Шукаємо альтернативні варіанти
+                if 'DisconSchedule' in html:
+                    print("   DisconSchedule знайдено в HTML")
+                    # Знайдемо всі згадки DisconSchedule
+                    matches = re.findall(r'DisconSchedule\.\w+', html)
+                    print(f"   Знайдено властивостей DisconSchedule: {set(matches)}")
+                else:
+                    print("   DisconSchedule взагалі не знайдено в HTML")
 
         # Витягуємо DisconSchedule.fact
         fact_pattern = r'DisconSchedule\.fact\s*=\s*(\{[^<]+\})</script>'
         fact_match = re.search(fact_pattern, html, re.DOTALL)
+
         if fact_match:
             try:
                 fact_json = fact_match.group(1).strip()
                 # Очищаємо від можливих коментарів
                 fact_json = re.sub(r'//.*?\n', '\n', fact_json)
                 self.fact_data = json.loads(fact_json)
+
+                if self.debug:
+                    print(f"✅ DisconSchedule.fact знайдено")
+                    if 'data' in self.fact_data:
+                        print(f"   Днів в розкладі: {len(self.fact_data['data'])}")
             except json.JSONDecodeError as e:
-                print(f"Помилка парсингу fact: {e}")
+                print(f"❌ Помилка парсингу fact: {e}")
+        else:
+            print("⚠️ DisconSchedule.fact не знайдено")
 
         # Витягуємо DisconSchedule.preset
-        preset_pattern = r'DisconSchedule\.preset\s*=\s*(\{[^;]+?\}\})'
+        preset_pattern = r'DisconSchedule\.preset\s*=\s*(\{.+?\}\})'
         preset_match = re.search(preset_pattern, html, re.DOTALL)
+
         if preset_match:
             try:
                 preset_json = preset_match.group(1)
-                # Розкодовуємо unicode escaped символи
-                preset_json = preset_json.encode().decode('unicode-escape')
                 self.preset_data = json.loads(preset_json)
+
+                if self.debug:
+                    print(f"✅ DisconSchedule.preset знайдено")
             except json.JSONDecodeError as e:
-                print(f"Помилка парсингу preset: {e}")
+                if self.debug:
+                    print(f"⚠️ Помилка парсингу preset (не критично): {e}")
 
         # Витягуємо AJAX URL
         ajax_pattern = r'<meta\s+name="ajaxUrl"\s+content="([^"]+)"'
         ajax_match = re.search(ajax_pattern, html)
+
         if ajax_match:
             self.ajax_url = ajax_match.group(1)
+            if self.debug:
+                print(f"✅ AJAX URL знайдено: {self.ajax_url}")
+        else:
+            # Пробуємо стандартний URL
+            self.ajax_url = "/ajax/discon-schedule/"
+            if self.debug:
+                print(f"⚠️ AJAX URL не знайдено, використовую стандартний: {self.ajax_url}")
+
+    def list_available_cities(self, filter_text: str = "") -> List[str]:
+        """Показує доступні міста"""
+        cities = list(self.streets_data.keys())
+
+        if filter_text:
+            cities = [c for c in cities if filter_text.lower() in c.lower()]
+
+        return sorted(cities)
 
     def get_house_numbers(self, city: str, street: str) -> Dict:
         """
@@ -83,6 +176,24 @@ class DTEKParser:
         """
         if not self.ajax_url:
             raise Exception("AJAX URL не знайдено")
+
+        # Формуємо повний URL
+        if self.ajax_url.startswith('http'):
+            ajax_url = self.ajax_url
+        else:
+            # Беремо базовий домен з base_url
+            from urllib.parse import urlparse
+            parsed = urlparse(self.base_url)
+            ajax_url = f"{parsed.scheme}://{parsed.netloc}{self.ajax_url}"
+
+        # Додаємо AJAX headers
+        ajax_headers = {
+            'X-Requested-With': 'XMLHttpRequest',
+            'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+            'Accept': 'application/json, text/javascript, */*; q=0.01',
+            'Origin': f"{parsed.scheme}://{parsed.netloc}",
+            'Referer': self.base_url,
+        }
 
         data = {
             'method': 'getHomeNum',
@@ -92,10 +203,32 @@ class DTEKParser:
             'data[1][value]': street,
         }
 
+        if self.debug:
+            print(f"\n🌐 AJAX запит до {ajax_url}")
+            print(f"   Параметри: city={city}, street={street}")
+
         try:
-            response = self.session.post(self.ajax_url, data=data, timeout=30)
+            # Додаємо невелику затримку перед AJAX запитом
+            time.sleep(0.5)
+
+            response = self.session.post(
+                ajax_url,
+                data=data,
+                headers=ajax_headers,
+                timeout=30
+            )
             response.raise_for_status()
-            return response.json()
+
+            result = response.json()
+
+            if self.debug:
+                print(f"✅ AJAX відповідь отримано")
+                print(f"   Result: {result.get('result', False)}")
+                if 'data' in result:
+                    print(f"   Будинків знайдено: {len(result['data'])}")
+
+            return result
+
         except requests.RequestException as e:
             raise Exception(f"Помилка AJAX запиту: {e}")
 
@@ -105,10 +238,31 @@ class DTEKParser:
         """
         # Спочатку перевіряємо чи є така вулиця в місті
         if city not in self.streets_data:
-            raise ValueError(f"Місто '{city}' не знайдено")
+            available = self.list_available_cities(city.split()[-1])  # Пошук по останньому слову
+
+            error_msg = f"Місто '{city}' не знайдено"
+            if available:
+                error_msg += f"\n\nМожливо ви мали на увазі одне з цих міст:\n"
+                for c in available[:10]:
+                    error_msg += f"  • {c}\n"
+            else:
+                error_msg += f"\n\nВсього доступно міст: {len(self.streets_data)}"
+                error_msg += f"\n\nВикористайте --list-cities для перегляду всіх міст"
+
+            raise ValueError(error_msg)
 
         if street not in self.streets_data[city]:
-            raise ValueError(f"Вулиця '{street}' не знайдена в місті '{city}'")
+            available_streets = self.streets_data[city]
+            error_msg = f"Вулиця '{street}' не знайдена в місті '{city}'"
+
+            # Шукаємо схожі назви
+            similar = [s for s in available_streets if street.split()[-1] in s]
+            if similar:
+                error_msg += f"\n\nСхожі вулиці:\n"
+                for s in similar[:10]:
+                    error_msg += f"  • {s}\n"
+
+            raise ValueError(error_msg)
 
         # Отримуємо дані про будинки через AJAX
         response = self.get_house_numbers(city, street)
@@ -190,7 +344,18 @@ class DTEKParser:
         """
         # Завантажуємо сторінку та парсимо дані
         html = self.fetch_page()
+
+        if self.debug:
+            self.save_html_debug(html)
+
         self.extract_javascript_data(html)
+
+        # Перевіряємо чи отримали дані
+        if not self.streets_data:
+            return {
+                'success': False,
+                'error': 'Не вдалося отримати дані про вулиці. Можливо сайт змінив структуру або є захист від ботів.'
+            }
 
         # Знаходимо групу для адреси
         group = self.find_address_group(city, street, house_num)
@@ -243,34 +408,77 @@ class DTEKParser:
 
 def main():
     """Основна функція"""
-    # Тестова адреса
-    city = "м. Дніпро"
-    street = "вул. Конотопська"
-    house_num = "169"
+    parser = argparse.ArgumentParser(
+        description='Парсер графіків відключень ДТЕК',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Приклади використання:
+  %(prog)s "м. Дніпро" "вул. Конотопська" "169"
+  %(prog)s "м. Дніпро" "вул. Конотопська" "169" --json
+  %(prog)s --list-cities
+  %(prog)s --list-cities --filter "Дніпро"
+  %(prog)s "м. Дніпро" "вул. Конотопська" "169" --debug
+        """
+    )
 
-    # Можна передати параметри через командний рядок
-    if len(sys.argv) >= 4:
-        city = sys.argv[1]
-        street = sys.argv[2]
-        house_num = sys.argv[3]
+    parser.add_argument('city', nargs='?', help='Місто (наприклад: "м. Дніпро")')
+    parser.add_argument('street', nargs='?', help='Вулиця (наприклад: "вул. Конотопська")')
+    parser.add_argument('house_num', nargs='?', help='Номер будинку (наприклад: "169")')
+    parser.add_argument('--json', action='store_true', help='Вивести результат в JSON форматі')
+    parser.add_argument('--debug', action='store_true', help='Увімкнути режим діагностики')
+    parser.add_argument('--list-cities', action='store_true', help='Показати всі доступні міста')
+    parser.add_argument('--filter', help='Фільтр для міст (використовується з --list-cities)')
+    parser.add_argument('--save-html', help='Зберегти HTML в файл для діагностики')
+
+    args = parser.parse_args()
+
+    # Режим перегляду міст
+    if args.list_cities:
+        print("\n🔍 Завантаження списку міст...")
+        dtek = DTEKParser(debug=args.debug)
+        html = dtek.fetch_page()
+        dtek.extract_javascript_data(html)
+
+        cities = dtek.list_available_cities(args.filter or "")
+
+        print(f"\n📋 Знайдено міст: {len(cities)}")
+        print("="*70)
+
+        for i, city in enumerate(cities, 1):
+            print(f"{i:3d}. {city}")
+
+        print("="*70)
+        return
+
+    # Перевірка аргументів
+    if not all([args.city, args.street, args.house_num]):
+        parser.print_help()
+        print("\n❌ Помилка: Потрібно вказати місто, вулицю та номер будинку")
+        print("   або використати --list-cities для перегляду доступних міст")
+        sys.exit(1)
 
     print(f"\n🔍 Отримання графіка відключень для адреси:")
-    print(f"   {city}, {street}, {house_num}\n")
+    print(f"   {args.city}, {args.street}, {args.house_num}\n")
 
     try:
-        parser = DTEKParser()
-        info = parser.get_outage_info(city, street, house_num)
-        parser.print_schedule(info)
+        dtek = DTEKParser(debug=args.debug)
+        info = dtek.get_outage_info(args.city, args.street, args.house_num)
 
-        # Повертаємо також JSON для можливості використання в інших скриптах
-        if len(sys.argv) > 4 and sys.argv[4] == '--json':
+        if args.save_html:
+            html = dtek.fetch_page()
+            dtek.save_html_debug(html, args.save_html)
+
+        if args.json:
             print("\n📄 JSON output:")
             print(json.dumps(info, ensure_ascii=False, indent=2))
+        else:
+            dtek.print_schedule(info)
 
     except Exception as e:
         print(f"❌ Помилка: {e}")
-        import traceback
-        traceback.print_exc()
+        if args.debug:
+            import traceback
+            traceback.print_exc()
         sys.exit(1)
 
 
