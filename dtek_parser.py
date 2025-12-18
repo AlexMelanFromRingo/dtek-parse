@@ -11,24 +11,76 @@ from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 import sys
 import argparse
+import subprocess
+
+import requests
 
 try:
     import cloudscraper
     CLOUDSCRAPER_AVAILABLE = True
 except ImportError:
     CLOUDSCRAPER_AVAILABLE = False
-    import requests
+
+try:
+    from selenium import webdriver
+    from selenium.webdriver.chrome.service import Service
+    from selenium.webdriver.chrome.options import Options
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+    from webdriver_manager.chrome import ChromeDriverManager
+    SELENIUM_AVAILABLE = True
+except ImportError:
+    SELENIUM_AVAILABLE = False
+
+try:
+    from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
+    PLAYWRIGHT_AVAILABLE = True
+except ImportError:
+    PLAYWRIGHT_AVAILABLE = False
 
 
 class DTEKParser:
     """Парсер для отримання графіків відключень з сайту ДТЕК"""
 
-    def __init__(self, base_url: str = "https://www.dtek-dnem.com.ua/ua/shutdowns", debug: bool = False):
+    def __init__(self, base_url: str = "https://www.dtek-dnem.com.ua/ua/shutdowns",
+                 debug: bool = False, use_browser: bool = False, use_curl: bool = True):
         self.base_url = base_url
         self.debug = debug
+        self.driver = None
+        self.playwright_browser = None
+        self.use_curl = use_curl
+        self.session = None  # Ініціалізуємо завжди
 
-        # Використовуємо cloudscraper для обходу Incapsula/Cloudflare
-        if CLOUDSCRAPER_AVAILABLE:
+        # Ініціалізуємо дані завжди
+        self.streets_data = {}
+        self.fact_data = {}
+        self.preset_data = {}
+        self.ajax_url = None
+        self.csrf_token = None
+
+        # Визначаємо який метод використовувати
+        # Пріоритет: curl > Playwright > Selenium > cloudscraper > requests
+        if self.use_curl:
+            if self.debug:
+                print("🔧 Використовую curl для завантаження сторінки")
+            # Створюємо простий session для AJAX запитів навіть якщо використовуємо curl
+            self.session = requests.Session()
+            self.session.headers.update({
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            })
+            return
+
+        self.use_playwright = use_browser and PLAYWRIGHT_AVAILABLE
+        self.use_selenium = use_browser and not self.use_playwright and SELENIUM_AVAILABLE
+
+        if self.use_playwright:
+            if self.debug:
+                print("🎭 Використовую Playwright (справжній браузер) для обходу антибот захисту")
+        elif self.use_selenium:
+            if self.debug:
+                print("🌐 Використовую Selenium (справжній браузер) для обходу антибот захисту")
+        elif CLOUDSCRAPER_AVAILABLE:
             if self.debug:
                 print("🛡️  Використовую cloudscraper для обходу антибот захисту")
 
@@ -63,13 +115,248 @@ class DTEKParser:
                 'Cache-Control': 'max-age=0',
             })
 
-        self.streets_data = {}
-        self.fact_data = {}
-        self.preset_data = {}
-        self.ajax_url = None
+    def _init_selenium_driver(self):
+        """Ініціалізує Selenium WebDriver"""
+        if self.driver is not None:
+            return
+
+        chrome_options = Options()
+        chrome_options.add_argument('--headless=new')  # Headless режим
+        chrome_options.add_argument('--no-sandbox')
+        chrome_options.add_argument('--disable-dev-shm-usage')
+        chrome_options.add_argument('--disable-blink-features=AutomationControlled')
+        chrome_options.add_experimental_option('excludeSwitches', ['enable-automation'])
+        chrome_options.add_experimental_option('useAutomationExtension', False)
+
+        # Вимкнути проксі
+        chrome_options.add_argument('--no-proxy-server')
+
+        # Реалістичний User-Agent
+        chrome_options.add_argument('user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
+
+        if self.debug:
+            print("🔧 Ініціалізація Chrome WebDriver...")
+
+        try:
+            service = Service(ChromeDriverManager().install())
+            self.driver = webdriver.Chrome(service=service, options=chrome_options)
+
+            # Приховуємо ознаки автоматизації
+            self.driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+
+            if self.debug:
+                print("✅ WebDriver успішно ініціалізовано")
+        except Exception as e:
+            if self.debug:
+                print(f"❌ Помилка ініціалізації WebDriver: {e}")
+            raise
+
+    def fetch_page_selenium(self, retry: int = 3, delay: float = 5.0) -> str:
+        """Завантажує сторінку через Selenium (справжній браузер)"""
+        for attempt in range(retry):
+            try:
+                if self.debug:
+                    print(f"🔄 Спроба {attempt + 1}/{retry} завантаження через Selenium...")
+
+                # Ініціалізуємо драйвер якщо потрібно
+                self._init_selenium_driver()
+
+                # Додаємо затримку між спробами
+                if attempt > 0:
+                    wait_time = delay * (attempt + 1)
+                    if self.debug:
+                        print(f"⏳ Очікування {wait_time}с перед наступною спробою...")
+                    time.sleep(wait_time)
+
+                # Завантажуємо сторінку
+                self.driver.set_page_load_timeout(45)  # Таймаут завантаження сторінки
+                self.driver.get(self.base_url)
+
+                # Чекаємо поки завантажиться JavaScript
+                if self.debug:
+                    print("⏳ Очікування завантаження JavaScript...")
+
+                # Чекаємо поки з'явиться DisconSchedule (максимум 20 секунд)
+                try:
+                    WebDriverWait(self.driver, 20).until(
+                        lambda d: d.execute_script("return typeof DisconSchedule !== 'undefined'")
+                    )
+                    if self.debug:
+                        print("✅ DisconSchedule завантажено")
+                except Exception as wait_error:
+                    if self.debug:
+                        print(f"⚠️  Таймаут очікування DisconSchedule: {wait_error}")
+                        print("   Спробую отримати HTML який є...")
+
+                # Отримуємо HTML
+                html = self.driver.page_source
+
+                if self.debug:
+                    print(f"✅ Сторінка завантажена через Selenium ({len(html)} байт)")
+
+                    # Перевіряємо чи є DisconSchedule
+                    if 'DisconSchedule' in html:
+                        print("✅ DisconSchedule знайдено в HTML")
+                    else:
+                        print("⚠️  DisconSchedule НЕ знайдено в HTML")
+
+                return html
+
+            except Exception as e:
+                if self.debug:
+                    print(f"❌ Помилка при спробі {attempt + 1}: {e}")
+
+                if attempt == retry - 1:
+                    raise Exception(f"Не вдалося завантажити сторінку через Selenium після {retry} спроб: {e}")
+
+        return ""
+
+    def fetch_page_playwright(self, retry: int = 3, delay: float = 5.0) -> str:
+        """Завантажує сторінку через Playwright (справжній браузер)"""
+        for attempt in range(retry):
+            try:
+                if self.debug:
+                    print(f"🔄 Спроба {attempt + 1}/{retry} завантаження через Playwright...")
+
+                # Додаємо затримку між спробами
+                if attempt > 0:
+                    wait_time = delay * (attempt + 1)
+                    if self.debug:
+                        print(f"⏳ Очікування {wait_time}с перед наступною спробою...")
+                    time.sleep(wait_time)
+
+                with sync_playwright() as p:
+                    # Запускаємо браузер з налаштуваннями
+                    browser = p.chromium.launch(
+                        headless=True,
+                        args=['--no-sandbox', '--disable-setuid-sandbox']
+                    )
+
+                    # Створюємо контекст з реалістичними налаштуваннями
+                    context = browser.new_context(
+                        user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                        viewport={'width': 1920, 'height': 1080},
+                        locale='uk-UA'
+                    )
+
+                    page = context.new_page()
+
+                    if self.debug:
+                        print(f"🌐 Завантаження {self.base_url}...")
+
+                    # Завантажуємо сторінку з таймаутом
+                    page.goto(self.base_url, timeout=45000, wait_until='domcontentloaded')
+
+                    if self.debug:
+                        print("⏳ Очікування завантаження JavaScript...")
+
+                    # Чекаємо поки з'явиться DisconSchedule
+                    try:
+                        page.wait_for_function(
+                            "typeof DisconSchedule !== 'undefined'",
+                            timeout=20000
+                        )
+                        if self.debug:
+                            print("✅ DisconSchedule завантажено")
+                    except PlaywrightTimeout:
+                        if self.debug:
+                            print("⚠️  Таймаут очікування DisconSchedule")
+                            print("   Спробую отримати HTML який є...")
+
+                    # Отримуємо HTML
+                    html = page.content()
+
+                    if self.debug:
+                        print(f"✅ Сторінка завантажена через Playwright ({len(html)} байт)")
+
+                        # Перевіряємо чи є DisconSchedule
+                        if 'DisconSchedule' in html:
+                            print("✅ DisconSchedule знайдено в HTML")
+                        else:
+                            print("⚠️  DisconSchedule НЕ знайдено в HTML")
+
+                    browser.close()
+                    return html
+
+            except Exception as e:
+                if self.debug:
+                    print(f"❌ Помилка при спробі {attempt + 1}: {e}")
+
+                if attempt == retry - 1:
+                    raise Exception(f"Не вдалося завантажити сторінку через Playwright після {retry} спроб: {e}")
+
+        return ""
+
+    def fetch_page_curl(self, retry: int = 3, delay: float = 2.0) -> str:
+        """Завантажує сторінку через curl"""
+        for attempt in range(retry):
+            try:
+                if self.debug:
+                    print(f"🔄 Спроба {attempt + 1}/{retry} завантаження через curl...")
+
+                # Додаємо затримку між спробами
+                if attempt > 0:
+                    wait_time = delay * (attempt + 1)
+                    if self.debug:
+                        print(f"⏳ Очікування {wait_time}с перед наступною спробою...")
+                    time.sleep(wait_time)
+
+                # Використовуємо curl з реалістичними headers
+                cmd = [
+                    'curl', '-s', '-L',
+                    '-H', 'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    '-H', 'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+                    '-H', 'Accept-Language: uk-UA,uk;q=0.9,en-US;q=0.8,en;q=0.7',
+                    '-H', 'Accept-Encoding: gzip, deflate',
+                    '-H', 'Connection: keep-alive',
+                    '--compressed',
+                    self.base_url
+                ]
+
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+
+                if result.returncode != 0:
+                    raise Exception(f"curl повернув код {result.returncode}: {result.stderr}")
+
+                html = result.stdout
+
+                if self.debug:
+                    print(f"✅ Сторінка завантажена через curl ({len(html)} байт)")
+
+                    # Перевіряємо чи є DisconSchedule
+                    if 'DisconSchedule' in html:
+                        print("✅ DisconSchedule знайдено в HTML")
+                    else:
+                        print("⚠️  DisconSchedule НЕ знайдено в HTML")
+
+                    # Перевіряємо чи це Incapsula блок
+                    if 'Incapsula' in html and len(html) < 2000:
+                        print("⚠️  Можливо Incapsula блокує запит")
+
+                return html
+
+            except Exception as e:
+                if self.debug:
+                    print(f"❌ Помилка при спробі {attempt + 1}: {e}")
+
+                if attempt == retry - 1:
+                    raise Exception(f"Не вдалося завантажити сторінку через curl після {retry} спроб: {e}")
+
+        return ""
 
     def fetch_page(self, retry: int = 3, delay: float = 3.0) -> str:
         """Завантажує HTML сторінку з графіками з ретраями"""
+        # Якщо використовуємо curl, викликаємо спеціальний метод
+        if self.use_curl:
+            return self.fetch_page_curl(retry, delay)
+        # Якщо використовуємо Playwright, викликаємо спеціальний метод
+        elif self.use_playwright:
+            return self.fetch_page_playwright(retry, delay)
+        # Якщо використовуємо Selenium, викликаємо спеціальний метод
+        elif self.use_selenium:
+            return self.fetch_page_selenium(retry, delay)
+
+        # Інакше використовуємо cloudscraper/requests
         for attempt in range(retry):
             try:
                 if self.debug:
@@ -137,7 +424,9 @@ class DTEKParser:
             print("\n🔍 Пошук JavaScript даних...")
 
         # Витягуємо DisconSchedule.streets
-        streets_pattern = r'DisconSchedule\.streets\s*=\s*(\{[^;]+\});'
+        # Шукаємо від = до наступного DisconSchedule або кінця рядка
+        # JavaScript без крапок з комою, кожне присвоєння на окремому рядку
+        streets_pattern = r'DisconSchedule\.streets\s*=\s*(\{.+?\})\s*\n'
         streets_match = re.search(streets_pattern, html, re.DOTALL)
 
         if streets_match:
@@ -213,6 +502,18 @@ class DTEKParser:
             if self.debug:
                 print(f"⚠️ AJAX URL не знайдено, використовую стандартний: {self.ajax_url}")
 
+        # Витягуємо CSRF токен
+        csrf_pattern = r'<meta\s+name="csrf-token"\s+content="([^"]+)"'
+        csrf_match = re.search(csrf_pattern, html)
+
+        if csrf_match:
+            self.csrf_token = csrf_match.group(1)
+            if self.debug:
+                print(f"✅ CSRF токен знайдено: {self.csrf_token[:20]}...")
+        else:
+            if self.debug:
+                print(f"⚠️ CSRF токен не знайдено")
+
     def list_available_cities(self, filter_text: str = "") -> List[str]:
         """Показує доступні міста"""
         cities = list(self.streets_data.keys())
@@ -247,6 +548,10 @@ class DTEKParser:
             'Referer': self.base_url,
         }
 
+        # Додаємо CSRF токен якщо він є
+        if self.csrf_token:
+            ajax_headers['X-CSRF-Token'] = self.csrf_token
+
         data = {
             'method': 'getHomeNum',
             'data[0][name]': 'city',
@@ -254,6 +559,10 @@ class DTEKParser:
             'data[1][name]': 'street',
             'data[1][value]': street,
         }
+
+        # Додаємо CSRF токен до POST даних також
+        if self.csrf_token:
+            data['_csrf-dtek-dnem'] = self.csrf_token
 
         if self.debug:
             print(f"\n🌐 AJAX запит до {ajax_url}")
@@ -456,6 +765,23 @@ class DTEKParser:
                 print(f"{time_range:15} | {status}")
 
         print("\n" + "="*70)
+
+    def close(self):
+        """Закриває Selenium драйвер якщо він використовується"""
+        if self.driver is not None:
+            try:
+                self.driver.quit()
+                if self.debug:
+                    print("✅ Selenium драйвер закрито")
+            except Exception as e:
+                if self.debug:
+                    print(f"⚠️  Помилка при закритті драйвера: {e}")
+            finally:
+                self.driver = None
+
+    def __del__(self):
+        """Деструктор для автоматичного закриття драйвера"""
+        self.close()
 
 
 def main():
