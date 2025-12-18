@@ -6,12 +6,18 @@ DTEK Power Outage Schedule Parser
 
 import re
 import json
-import requests
 import time
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 import sys
 import argparse
+
+try:
+    import cloudscraper
+    CLOUDSCRAPER_AVAILABLE = True
+except ImportError:
+    CLOUDSCRAPER_AVAILABLE = False
+    import requests
 
 
 class DTEKParser:
@@ -20,29 +26,49 @@ class DTEKParser:
     def __init__(self, base_url: str = "https://www.dtek-dnem.com.ua/ua/shutdowns", debug: bool = False):
         self.base_url = base_url
         self.debug = debug
-        self.session = requests.Session()
 
-        # Більш реалістичні headers як у справжнього браузера
-        self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-            'Accept-Language': 'uk-UA,uk;q=0.9,en-US;q=0.8,en;q=0.7',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1',
-            'Sec-Fetch-Dest': 'document',
-            'Sec-Fetch-Mode': 'navigate',
-            'Sec-Fetch-Site': 'none',
-            'Sec-Fetch-User': '?1',
-            'Cache-Control': 'max-age=0',
-        })
+        # Використовуємо cloudscraper для обходу Incapsula/Cloudflare
+        if CLOUDSCRAPER_AVAILABLE:
+            if self.debug:
+                print("🛡️  Використовую cloudscraper для обходу антибот захисту")
+
+            self.session = cloudscraper.create_scraper(
+                browser={
+                    'browser': 'chrome',
+                    'platform': 'windows',
+                    'mobile': False
+                },
+                delay=10,  # Затримка між запитами
+                debug=self.debug
+            )
+        else:
+            if self.debug:
+                print("⚠️  cloudscraper не встановлено, використовую звичайний requests")
+                print("   Встановіть: pip install cloudscraper")
+
+            self.session = requests.Session()
+
+            # Більш реалістичні headers як у справжнього браузера
+            self.session.headers.update({
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+                'Accept-Language': 'uk-UA,uk;q=0.9,en-US;q=0.8,en;q=0.7',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1',
+                'Sec-Fetch-Dest': 'document',
+                'Sec-Fetch-Mode': 'navigate',
+                'Sec-Fetch-Site': 'none',
+                'Sec-Fetch-User': '?1',
+                'Cache-Control': 'max-age=0',
+            })
 
         self.streets_data = {}
         self.fact_data = {}
         self.preset_data = {}
         self.ajax_url = None
 
-    def fetch_page(self, retry: int = 3, delay: float = 2.0) -> str:
+    def fetch_page(self, retry: int = 3, delay: float = 3.0) -> str:
         """Завантажує HTML сторінку з графіками з ретраями"""
         for attempt in range(retry):
             try:
@@ -51,19 +77,45 @@ class DTEKParser:
 
                 # Додаємо затримку між спробами для більш "людської" поведінки
                 if attempt > 0:
-                    time.sleep(delay * attempt)
+                    wait_time = delay * (attempt + 1)
+                    if self.debug:
+                        print(f"⏳ Очікування {wait_time}с перед наступною спробою...")
+                    time.sleep(wait_time)
 
-                response = self.session.get(self.base_url, timeout=30)
+                response = self.session.get(self.base_url, timeout=60)
                 response.raise_for_status()
+
+                # Перевіряємо чи це не Incapsula блок
+                if len(response.text) < 500 and 'Incapsula' in response.text:
+                    if self.debug:
+                        print(f"⚠️  Отримано Incapsula challenge (спроба {attempt + 1})")
+
+                    if not CLOUDSCRAPER_AVAILABLE:
+                        raise Exception(
+                            "Сайт захищений Incapsula/Cloudflare. "
+                            "Встановіть cloudscraper: pip install cloudscraper"
+                        )
+
+                    # cloudscraper повинен автоматично обробити challenge
+                    if attempt < retry - 1:
+                        continue
+                    else:
+                        raise Exception("Не вдалося обійти Incapsula захист")
 
                 if self.debug:
                     print(f"✅ Сторінка завантажена ({len(response.text)} байт)")
                     print(f"📝 Status code: {response.status_code}")
                     print(f"🍪 Cookies: {dict(response.cookies)}")
 
+                    # Перевіряємо чи є DisconSchedule в відповіді
+                    if 'DisconSchedule' in response.text:
+                        print(f"✅ DisconSchedule знайдено в HTML")
+                    else:
+                        print(f"⚠️  DisconSchedule НЕ знайдено в HTML")
+
                 return response.text
 
-            except requests.RequestException as e:
+            except Exception as e:
                 if self.debug:
                     print(f"❌ Помилка при спробі {attempt + 1}: {e}")
 
