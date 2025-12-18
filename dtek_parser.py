@@ -44,13 +44,15 @@ class DTEKParser:
     """Парсер для отримання графіків відключень з сайту ДТЕК"""
 
     def __init__(self, base_url: str = "https://www.dtek-dnem.com.ua/ua/shutdowns",
-                 debug: bool = False, use_browser: bool = False, use_curl: bool = True):
+                 debug: bool = False, use_browser: bool = False, use_curl: bool = True,
+                 html_file: str = None):
         self.base_url = base_url
         self.debug = debug
         self.driver = None
         self.playwright_browser = None
         self.use_curl = use_curl
         self.session = None  # Ініціалізуємо завжди
+        self.html_file = html_file  # Опція для використання збереженого HTML
 
         # Ініціалізуємо дані завжди
         self.streets_data = {}
@@ -346,6 +348,16 @@ class DTEKParser:
 
     def fetch_page(self, retry: int = 3, delay: float = 3.0) -> str:
         """Завантажує HTML сторінку з графіками з ретраями"""
+        # Якщо вказано файл для читання - використовуємо його
+        if self.html_file:
+            if self.debug:
+                print(f"📂 Читання HTML з файлу: {self.html_file}")
+            with open(self.html_file, 'r', encoding='utf-8') as f:
+                html = f.read()
+            if self.debug:
+                print(f"✅ HTML завантажено з файлу ({len(html)} байт)")
+            return html
+
         # Якщо використовуємо curl, викликаємо спеціальний метод
         if self.use_curl:
             return self.fetch_page_curl(retry, delay)
@@ -454,7 +466,8 @@ class DTEKParser:
                     print("   DisconSchedule взагалі не знайдено в HTML")
 
         # Витягуємо DisconSchedule.fact
-        fact_pattern = r'DisconSchedule\.fact\s*=\s*(\{[^<]+\})</script>'
+        # fact може бути дуже великим JSON, використовуємо .*? для non-greedy match
+        fact_pattern = r'DisconSchedule\.fact\s*=\s*(\{.*?\})</script>'
         fact_match = re.search(fact_pattern, html, re.DOTALL)
 
         if fact_match:
@@ -699,6 +712,66 @@ class DTEKParser:
 
         return result
 
+    def get_group_schedule(self, group: str) -> Dict:
+        """
+        Отримує графік відключень для конкретної групи (наприклад GPV1.1)
+        Не потребує адреси - працює напряму з групою
+        """
+        # Завантажуємо сторінку та парсимо дані
+        html = self.fetch_page()
+
+        if self.debug:
+            self.save_html_debug(html)
+
+        self.extract_javascript_data(html)
+
+        # Перевіряємо чи отримали дані
+        if not self.fact_data or 'data' not in self.fact_data:
+            return {
+                'success': False,
+                'error': 'Не вдалося отримати дані про графіки відключень.'
+            }
+
+        # Перевіряємо чи існує така група
+        # Беремо перший день для перевірки
+        first_day_data = list(self.fact_data['data'].values())[0] if self.fact_data['data'] else {}
+        if group not in first_day_data:
+            available_groups = list(first_day_data.keys())
+            return {
+                'success': False,
+                'error': f'Група "{group}" не знайдена. Доступні групи: {", ".join(available_groups)}'
+            }
+
+        # Отримуємо графіки для всіх доступних днів
+        schedules = {}
+        for timestamp, day_data in self.fact_data['data'].items():
+            if group in day_data:
+                # Конвертуємо timestamp в дату
+                date = datetime.fromtimestamp(int(timestamp))
+                date_str = date.strftime('%Y-%m-%d (%A)')
+                schedules[date_str] = self.format_schedule(day_data[group])
+
+        return {
+            'success': True,
+            'group': group,
+            'group_name': self.preset_data.get('sch_names', {}).get(group, group),
+            'update_time': self.fact_data.get('updateFact', 'Невідомо'),
+            'schedules': schedules
+        }
+
+    def list_groups(self) -> List[str]:
+        """Повертає список всіх доступних груп відключень"""
+        # Завантажуємо сторінку та парсимо дані
+        html = self.fetch_page()
+        self.extract_javascript_data(html)
+
+        if not self.fact_data or 'data' not in self.fact_data:
+            return []
+
+        # Беремо групи з першого дня
+        first_day_data = list(self.fact_data['data'].values())[0] if self.fact_data['data'] else {}
+        return list(first_day_data.keys())
+
     def get_outage_info(self, city: str, street: str, house_num: str) -> Dict:
         """
         Головна функція для отримання інформації про відключення
@@ -805,15 +878,77 @@ def main():
     parser.add_argument('--json', action='store_true', help='Вивести результат в JSON форматі')
     parser.add_argument('--debug', action='store_true', help='Увімкнути режим діагностики')
     parser.add_argument('--list-cities', action='store_true', help='Показати всі доступні міста')
+    parser.add_argument('--list-groups', action='store_true', help='Показати всі доступні групи відключень (GPV1.1, GPV1.2, тощо)')
+    parser.add_argument('--group', help='Отримати графік для конкретної групи (наприклад: GPV1.1)')
     parser.add_argument('--filter', help='Фільтр для міст (використовується з --list-cities)')
     parser.add_argument('--save-html', help='Зберегти HTML в файл для діагностики')
+    parser.add_argument('--from-file', help='Використати збережений HTML файл замість завантаження з сайту')
 
     args = parser.parse_args()
+
+    # Режим перегляду груп
+    if args.list_groups:
+        print("\n🔍 Завантаження списку груп відключень...")
+        dtek = DTEKParser(debug=args.debug, html_file=args.from_file)
+        groups = dtek.list_groups()
+
+        if not groups:
+            print("❌ Не вдалося отримати список груп")
+            sys.exit(1)
+
+        print(f"\n📋 Доступні групи відключень: {len(groups)}")
+        print("="*70)
+
+        for i, group in enumerate(groups, 1):
+            group_name = dtek.preset_data.get('sch_names', {}).get(group, group)
+            print(f"{i:3d}. {group:10s} - {group_name}")
+
+        print("="*70)
+        print("\n💡 Використання: python3 dtek_parser.py --group GPV1.1")
+        return
+
+    # Режим перегляду графіка по групі
+    if args.group:
+        print(f"\n🔍 Отримання графіка для групи: {args.group}\n")
+
+        try:
+            dtek = DTEKParser(debug=args.debug, html_file=args.from_file)
+            info = dtek.get_group_schedule(args.group)
+
+            if args.json:
+                print("\n📄 JSON output:")
+                print(json.dumps(info, ensure_ascii=False, indent=2))
+            else:
+                if not info.get('success'):
+                    print(f"❌ Помилка: {info.get('error')}")
+                    return
+
+                print("="*70)
+                print(f"🏷️  Група: {info['group_name']} ({info['group']})")
+                print(f"🕐 Оновлено: {info['update_time']}")
+                print("="*70)
+
+                for date, schedule in info['schedules'].items():
+                    print(f"\n📅 {date}")
+                    print("-" * 70)
+                    for time_range, status in schedule:
+                        print(f"{time_range:15} | {status}")
+
+                print("\n" + "="*70)
+
+        except Exception as e:
+            print(f"❌ Помилка: {e}")
+            if args.debug:
+                import traceback
+                traceback.print_exc()
+            sys.exit(1)
+
+        return
 
     # Режим перегляду міст
     if args.list_cities:
         print("\n🔍 Завантаження списку міст...")
-        dtek = DTEKParser(debug=args.debug)
+        dtek = DTEKParser(debug=args.debug, html_file=args.from_file)
         html = dtek.fetch_page()
         dtek.extract_javascript_data(html)
 
@@ -839,7 +974,7 @@ def main():
     print(f"   {args.city}, {args.street}, {args.house_num}\n")
 
     try:
-        dtek = DTEKParser(debug=args.debug)
+        dtek = DTEKParser(debug=args.debug, html_file=args.from_file)
         info = dtek.get_outage_info(args.city, args.street, args.house_num)
 
         if args.save_html:

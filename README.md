@@ -6,11 +6,13 @@
 
 - ✅ Автоматичне завантаження HTML з сайту ДТЕК
 - ✅ Парсинг JavaScript даних (`DisconSchedule.streets`, `DisconSchedule.fact`)
+- ✅ **Перегляд графіків відключень напряму по групі (GPV)** - без потреби вводити адресу
 - ✅ Пошук групи відключень (GPV) для конкретної адреси через AJAX
 - ✅ Отримання графіків відключень на кілька днів вперед
 - ✅ Розшифровка статусів (є світло, відключення, можливе відключення)
 - ✅ Виведення даних в зручному читабельному форматі
 - ✅ Підтримка експорту в JSON
+- ✅ Робота зі збереженими HTML файлами (для offline використання)
 
 ## 📋 Вимоги
 
@@ -43,10 +45,47 @@ pip install cloudscraper
 
 ## 📖 Використання
 
-### Базове використання
+### Базове використання (пошук по адресі)
 
 ```bash
 python dtek_parser.py "м. Дніпро" "вул. Конотопська" "169"
+```
+
+### 🆕 Перегляд графіків по групі відключень (без адреси)
+
+Це найпростіший та найнадійніший спосіб отримати графік відключень, якщо ви вже знаєте свою групу (GPV):
+
+```bash
+# Перегляд всіх доступних груп
+python dtek_parser.py --list-groups
+
+# Перегляд графіка для конкретної групи
+python dtek_parser.py --group GPV1.1
+```
+
+**Приклад виводу:**
+```
+🏷️  Група: GPV1.1 (GPV1.1)
+🕐 Оновлено: 18.12.2025 20:00
+
+📅 2025-12-18 (Wednesday)
+00:00-01:00     | ✅ Є СВІТЛО
+01:00-02:00     | ✅ Є СВІТЛО
+02:00-03:00     | ❌ ВІДКЛЮЧЕННЯ
+...
+```
+
+### Робота зі збереженими HTML файлами
+
+Якщо у вас є збережений HTML файл зі сторінки ДТЕК, ви можете використовувати його для offline аналізу:
+
+```bash
+# Зберегти HTML
+curl "https://www.dtek-dnem.com.ua/ua/shutdowns" -o page.html
+
+# Використати збережений HTML
+python dtek_parser.py --list-groups --from-file page.html
+python dtek_parser.py --group GPV1.1 --from-file page.html
 ```
 
 ### Режим діагностики (рекомендовано при проблемах)
@@ -82,20 +121,10 @@ python dtek_parser.py "м. Дніпро" "вул. Конотопська" "169" 
 ```python
 from dtek_parser import DTEKParser
 
-# Створюємо парсер
+# Варіант 1: Отримання графіка по групі (найпростіше)
 parser = DTEKParser()
+info = parser.get_group_schedule("GPV1.1")
 
-# Отримуємо інформацію про відключення
-info = parser.get_outage_info(
-    city="м. Дніпро",
-    street="вул. Конотопська",
-    house_num="169"
-)
-
-# Виводимо результат
-parser.print_schedule(info)
-
-# Або працюємо з даними безпосередньо
 if info['success']:
     print(f"Група: {info['group']}")
     print(f"Оновлено: {info['update_time']}")
@@ -104,6 +133,24 @@ if info['success']:
         print(f"\n{date}")
         for time_range, status in schedule:
             print(f"{time_range}: {status}")
+
+# Варіант 2: Перегляд всіх доступних груп
+parser = DTEKParser()
+groups = parser.list_groups()
+print(f"Доступні групи: {groups}")
+
+# Варіант 3: Пошук по адресі
+parser = DTEKParser()
+info = parser.get_outage_info(
+    city="м. Дніпро",
+    street="вул. Конотопська",
+    house_num="169"
+)
+parser.print_schedule(info)
+
+# Варіант 4: Використання збереженого HTML файлу
+parser = DTEKParser(html_file="page.html")
+info = parser.get_group_schedule("GPV1.1")
 ```
 
 ## 📊 Формат відповіді
