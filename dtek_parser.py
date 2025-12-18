@@ -289,8 +289,10 @@ class DTEKParser:
 
         return ""
 
-    def fetch_page_curl(self, retry: int = 3, delay: float = 2.0) -> str:
-        """Завантажує сторінку через curl"""
+    def fetch_page_curl(self, retry: int = 5, delay: float = 2.0) -> str:
+        """Завантажує сторінку через curl з автоматичними ретраями при блокуванні"""
+        MIN_VALID_SIZE = 10000  # Мінімальний розмір валідної відповіді (10 KB)
+
         for attempt in range(retry):
             try:
                 if self.debug:
@@ -298,7 +300,7 @@ class DTEKParser:
 
                 # Додаємо затримку між спробами
                 if attempt > 0:
-                    wait_time = delay * (attempt + 1)
+                    wait_time = delay * attempt
                     if self.debug:
                         print(f"⏳ Очікування {wait_time}с перед наступною спробою...")
                     time.sleep(wait_time)
@@ -322,6 +324,16 @@ class DTEKParser:
 
                 html = result.stdout
 
+                # Перевіряємо розмір відповіді - якщо занадто мала, це блокування
+                if len(html) < MIN_VALID_SIZE:
+                    if self.debug:
+                        print(f"⚠️  Отримано занадто малу відповідь ({len(html)} байт)")
+                        print(f"⚠️  Можливо Incapsula блокує запит, спробую ще раз...")
+                    if attempt < retry - 1:
+                        continue
+                    else:
+                        raise Exception(f"Отримано занадто малу відповідь ({len(html)} байт), можливо Incapsula блокує")
+
                 if self.debug:
                     print(f"✅ Сторінка завантажена через curl ({len(html)} байт)")
 
@@ -330,10 +342,16 @@ class DTEKParser:
                         print("✅ DisconSchedule знайдено в HTML")
                     else:
                         print("⚠️  DisconSchedule НЕ знайдено в HTML")
+                        # Якщо немає DisconSchedule, спробуємо ще раз
+                        if attempt < retry - 1:
+                            print("⚠️  Спробую ще раз отримати правильну сторінку...")
+                            continue
 
-                    # Перевіряємо чи це Incapsula блок
-                    if 'Incapsula' in html and len(html) < 2000:
-                        print("⚠️  Можливо Incapsula блокує запит")
+                # Перевіряємо чи є DisconSchedule в відповіді
+                if 'DisconSchedule' not in html and attempt < retry - 1:
+                    if self.debug:
+                        print("⚠️  DisconSchedule не знайдено, повторюю спробу...")
+                    continue
 
                 return html
 
@@ -540,6 +558,9 @@ class DTEKParser:
         """
         Отримує номери будинків та групи відключень для вулиці через AJAX
         """
+        from urllib.parse import urlparse
+        import re
+
         if not self.ajax_url:
             raise Exception("AJAX URL не знайдено")
 
@@ -548,11 +569,38 @@ class DTEKParser:
             ajax_url = self.ajax_url
         else:
             # Беремо базовий домен з base_url
-            from urllib.parse import urlparse
             parsed = urlparse(self.base_url)
             ajax_url = f"{parsed.scheme}://{parsed.netloc}{self.ajax_url}"
 
+        # ВАЖЛИВО: Якщо використовуємо curl, спочатку треба завантажити головну сторінку
+        # через requests.Session, щоб отримати правильні cookies та CSRF токен для тієї ж сесії
+        session_csrf_token = None
+        if self.use_curl and self.session:
+            if self.debug:
+                print("🍪 Завантаження головної сторінки через session для отримання cookies та CSRF...")
+            try:
+                get_response = self.session.get(self.base_url, timeout=15)
+                if self.debug:
+                    print(f"✅ Cookies отримано: {len(self.session.cookies)} шт")
+
+                # Витягуємо CSRF токен з відповіді session
+                csrf_match = re.search(r'csrf-token" content="([^"]+)"', get_response.text)
+                if csrf_match:
+                    session_csrf_token = csrf_match.group(1)
+                    if self.debug:
+                        print(f"✅ Session CSRF токен: {session_csrf_token[:20]}...")
+                else:
+                    if self.debug:
+                        print(f"⚠️  CSRF токен не знайдено в session відповіді")
+            except Exception as e:
+                if self.debug:
+                    print(f"⚠️  Помилка отримання session cookies: {e}")
+
+        # Використовуємо session CSRF токен якщо він є, інакше загальний
+        csrf_token = session_csrf_token if session_csrf_token else self.csrf_token
+
         # Додаємо AJAX headers
+        parsed = urlparse(self.base_url)
         ajax_headers = {
             'X-Requested-With': 'XMLHttpRequest',
             'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
@@ -562,8 +610,8 @@ class DTEKParser:
         }
 
         # Додаємо CSRF токен якщо він є
-        if self.csrf_token:
-            ajax_headers['X-CSRF-Token'] = self.csrf_token
+        if csrf_token:
+            ajax_headers['X-CSRF-Token'] = csrf_token
 
         data = {
             'method': 'getHomeNum',
@@ -574,12 +622,14 @@ class DTEKParser:
         }
 
         # Додаємо CSRF токен до POST даних також
-        if self.csrf_token:
-            data['_csrf-dtek-dnem'] = self.csrf_token
+        if csrf_token:
+            data['_csrf-dtek-dnem'] = csrf_token
 
         if self.debug:
             print(f"\n🌐 AJAX запит до {ajax_url}")
             print(f"   Параметри: city={city}, street={street}")
+            print(f"   CSRF токен: {csrf_token[:20] if csrf_token else 'відсутній'}...")
+            print(f"   Cookies: {len(self.session.cookies)} шт")
 
         try:
             # Додаємо невелику затримку перед AJAX запитом
@@ -604,6 +654,8 @@ class DTEKParser:
             return result
 
         except requests.RequestException as e:
+            if self.debug and hasattr(e, 'response') and e.response is not None:
+                print(f"❌ HTTP {e.response.status_code}: {e.response.text[:200]}")
             raise Exception(f"Помилка AJAX запиту: {e}")
 
     def find_address_group(self, city: str, street: str, house_num: str) -> Optional[str]:
