@@ -75,19 +75,45 @@ impl DTEKParser {
     /// Fetch page HTML using curl to bypass Incapsula
     fn fetch_page_curl(&self) -> Result<String> {
         const MIN_VALID_SIZE: usize = 10_000;
-        const MAX_RETRIES: usize = 5;
+        const MAX_RETRIES: usize = 10; // Збільшено з 5 до 10
 
         for attempt in 0..MAX_RETRIES {
+            // Експоненціальна затримка: 0, 2, 4, 6, 8, 10... секунд
+            if attempt > 0 {
+                let delay = std::cmp::min(attempt * 2, 10);
+                std::thread::sleep(std::time::Duration::from_secs(delay as u64));
+            }
+
             let output = Command::new("curl")
                 .arg("-s")
                 .arg("-L")
+                .arg("--compressed") // Підтримка gzip/deflate
                 .arg(&self.base_url)
+                // Більш реалістичний User-Agent з повною версією Chrome
                 .arg("-H")
-                .arg("User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+                .arg("User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
                 .arg("-H")
-                .arg("Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+                .arg("Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7")
                 .arg("-H")
-                .arg("Accept-Language: uk-UA,uk;q=0.9,en;q=0.8")
+                .arg("Accept-Language: uk-UA,uk;q=0.9,en-US;q=0.8,en;q=0.7")
+                .arg("-H")
+                .arg("Accept-Encoding: gzip, deflate, br")
+                .arg("-H")
+                .arg("DNT: 1") // Do Not Track
+                .arg("-H")
+                .arg("Connection: keep-alive")
+                .arg("-H")
+                .arg("Upgrade-Insecure-Requests: 1")
+                .arg("-H")
+                .arg("Sec-Fetch-Dest: document")
+                .arg("-H")
+                .arg("Sec-Fetch-Mode: navigate")
+                .arg("-H")
+                .arg("Sec-Fetch-Site: none")
+                .arg("-H")
+                .arg("Sec-Fetch-User: ?1")
+                .arg("-H")
+                .arg("Cache-Control: max-age=0")
                 .output()
                 .context("Failed to execute curl command")?;
 
@@ -99,7 +125,6 @@ impl DTEKParser {
                         String::from_utf8_lossy(&output.stderr)
                     ));
                 }
-                std::thread::sleep(std::time::Duration::from_secs(2));
                 continue;
             }
 
@@ -108,7 +133,8 @@ impl DTEKParser {
             // Check if response is too small (likely blocked)
             if html.len() < MIN_VALID_SIZE {
                 if attempt < MAX_RETRIES - 1 {
-                    std::thread::sleep(std::time::Duration::from_secs(2));
+                    eprintln!("⚠️ Спроба {}/{}: отримано занадто мало даних ({} байт), повторюю...",
+                        attempt + 1, MAX_RETRIES, html.len());
                     continue;
                 }
             }
@@ -116,10 +142,14 @@ impl DTEKParser {
             // Check if DisconSchedule exists
             if !html.contains("DisconSchedule") {
                 if attempt < MAX_RETRIES - 1 {
-                    std::thread::sleep(std::time::Duration::from_secs(2));
+                    eprintln!("⚠️ Спроба {}/{}: DisconSchedule не знайдено, повторюю...",
+                        attempt + 1, MAX_RETRIES);
                     continue;
                 }
-                return Err(anyhow!("DisconSchedule not found in HTML"));
+                return Err(anyhow!(
+                    "DisconSchedule not found in HTML after {} attempts. Можливо, сайт тимчасово недоступний або змінився формат. Спробуйте через 1-2 хвилини.",
+                    MAX_RETRIES
+                ));
             }
 
             return Ok(html);
