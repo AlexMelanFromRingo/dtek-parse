@@ -7,7 +7,7 @@ DTEK Power Outage Schedule Parser
 import re
 import json
 import time
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional, Tuple
 import sys
 import argparse
@@ -739,13 +739,13 @@ class DTEKParser:
         result = []
 
         status_map = {
-            'yes': '❌ ВІДКЛЮЧЕННЯ',
-            'no': '✅ Є СВІТЛО',
+            'no': '❌ ВІДКЛЮЧЕННЯ',
+            'yes': '✅ Є СВІТЛО',
             'maybe': '⚠️ Можливе відключення',
-            'first': '✅ Є СВІТЛО (перші 30 хв, відключення другі 30 хв)',
-            'second': '✅ Є СВІТЛО (другі 30 хв, відключення перші 30 хв)',
-            'mfirst': '✅ Є СВІТЛО (перші 30 хв, можливе відключення другі 30 хв)',
-            'msecond': '✅ Є СВІТЛО (другі 30 хв, можливе відключення перші 30 хв)',
+            'first': '⚠️ ВІДКЛЮЧЕННЯ перші 30 хв (світло другі 30 хв)',
+            'second': '⚠️ ВІДКЛЮЧЕННЯ другі 30 хв (світло перші 30 хв)',
+            'mfirst': '⚠️ Можливе відключення перші 30 хв (світло другі 30 хв)',
+            'msecond': '⚠️ Можливе відключення другі 30 хв (світло перші 30 хв)',
         }
 
         for hour in range(1, 25):
@@ -795,11 +795,13 @@ class DTEKParser:
             }
 
         # Отримуємо графіки для всіх доступних днів
+        # Використовуємо київський час (UTC+2) для конвертації timestamp
+        kyiv_tz = timezone(timedelta(hours=2))
         schedules = {}
         for timestamp, day_data in self.fact_data['data'].items():
             if group in day_data:
-                # Конвертуємо timestamp в дату
-                date = datetime.fromtimestamp(int(timestamp))
+                # Конвертуємо timestamp в дату (київський час)
+                date = datetime.fromtimestamp(int(timestamp), tz=kyiv_tz)
                 date_str = date.strftime('%Y-%m-%d (%A)')
                 schedules[date_str] = self.format_schedule(day_data[group])
 
@@ -853,12 +855,14 @@ class DTEKParser:
             }
 
         # Отримуємо графіки для всіх доступних днів
+        # Використовуємо київський час (UTC+2) для конвертації timestamp
+        kyiv_tz = timezone(timedelta(hours=2))
         schedules = {}
         if 'data' in self.fact_data:
             for timestamp, day_data in self.fact_data['data'].items():
                 if group in day_data:
-                    # Конвертуємо timestamp в дату
-                    date = datetime.fromtimestamp(int(timestamp))
+                    # Конвертуємо timestamp в дату (київський час)
+                    date = datetime.fromtimestamp(int(timestamp), tz=kyiv_tz)
                     date_str = date.strftime('%Y-%m-%d (%A)')
                     schedules[date_str] = self.format_schedule(day_data[group])
 
