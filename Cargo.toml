@@ -1,0 +1,28 @@
+[package]
+name = "dtek-parse"
+version = "0.1.0"
+edition = "2021"
+authors = ["DTEK Parser Contributors"]
+description = "DTEK power outage schedule parser library"
+license = "MIT"
+repository = "https://github.com/AlexMelanFromRingo/dtek-parse"
+
+[lib]
+name = "dtek_parse"
+path = "src/lib.rs"
+
+[[bin]]
+name = "dtek-parse"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+regex = "1.10"
+reqwest = { version = "0.11", features = ["blocking", "cookies"] }
+chrono = "0.4"
+anyhow = "1.0"
+thiserror = "1.0"
+clap = { version = "4.5", features = ["derive"] }
+
+[dev-dependencies]
