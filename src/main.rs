@@ -600,34 +600,16 @@ async fn handle_button_interaction(
                 for (i, (date, hours)) in schedule_data.schedules.iter().enumerate() {
                     if i >= 2 { break; }
 
-                    let mut has_power = Vec::new();
-                    let mut no_power = Vec::new();
-                    let mut maybe = Vec::new();
+                    // Табличний формат як у CLI!
+                    let mut schedule_text = String::from("```\n");
+                    schedule_text.push_str("----------------------------------------------------------------------\n");
 
                     for (time, status) in hours {
-                        if status.contains("✅") {
-                            has_power.push(time);
-                        } else if status.contains("❌") {
-                            no_power.push(time);
-                        } else {
-                            maybe.push(time);
-                        }
+                        // Повний текст статусу
+                        schedule_text.push_str(&format!("{:<15} | {}\n", time, status));
                     }
 
-                    let mut schedule_text = String::new();
-
-                    if !has_power.is_empty() {
-                        let times: Vec<&str> = has_power.iter().map(|s| s.as_str()).collect();
-                        schedule_text.push_str(&format!("✅ **Є світло:**\n`{}`\n\n", times.join(", ")));
-                    }
-                    if !no_power.is_empty() {
-                        let times: Vec<&str> = no_power.iter().map(|s| s.as_str()).collect();
-                        schedule_text.push_str(&format!("❌ **Відключення:**\n`{}`\n\n", times.join(", ")));
-                    }
-                    if !maybe.is_empty() {
-                        let times: Vec<&str> = maybe.iter().map(|s| s.as_str()).collect();
-                        schedule_text.push_str(&format!("⚠️ **Можливі:**\n`{}`", times.join(", ")));
-                    }
+                    schedule_text.push_str("```");
 
                     embed = embed.field(format!("📅 {}", date), schedule_text, false);
                 }
