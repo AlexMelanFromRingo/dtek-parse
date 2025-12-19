@@ -481,25 +481,13 @@ async fn send_schedule_embed(ctx: Context<'_>, data: dtek_parse::ScheduleData) -
             break;
         }
 
-        // Створюємо табличне форматування як у CLI
+        // Створюємо табличне форматування як у CLI (повний формат!)
         let mut schedule_text = String::from("```\n");
-        schedule_text.push_str("----------------------------------------------\n");
+        schedule_text.push_str("----------------------------------------------------------------------\n");
 
         for (time, status) in hours {
-            let icon_and_text = if status.contains("✅") {
-                "✅ Є СВІТЛО"
-            } else if status.contains("❌") {
-                "❌ ВІДКЛЮЧЕННЯ"
-            } else if status.contains("перші 30 хв") {
-                "⚠️ ВІДКЛЮЧЕННЯ перші 30 хв"
-            } else if status.contains("другі 30 хв") {
-                "⚠️ ВІДКЛЮЧЕННЯ другі 30 хв"
-            } else {
-                "⚠️ Можливе відключення"
-            };
-
-            // Форматуємо як таблицю з вирівнюванням (16 символів для часу, | розділювач)
-            schedule_text.push_str(&format!("{:<13} | {}\n", time, icon_and_text));
+            // Використовуємо повний текст статусу як у CLI, а не скорочений
+            schedule_text.push_str(&format!("{:<15} | {}\n", time, status));
         }
 
         schedule_text.push_str("```");

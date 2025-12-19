@@ -14,8 +14,8 @@ tokio = { version = "1", features = ["full"] }
 # Database
 sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "sqlite"] }
 
-# DTEK parser
-dtek-parse = { git = "https://github.com/AlexMelanFromRingo/dtek-parse.git", branch = "claude/rust-port-curl-only-xllUi" }
+# DTEK parser with headless browser bypass
+dtek-parse = { git = "https://github.com/AlexMelanFromRingo/dtek-parse.git", branch = "claude/rust-port-curl-only-xllUi", features = ["browser"] }
 
 # Utils
 dotenvy = "0.15"
