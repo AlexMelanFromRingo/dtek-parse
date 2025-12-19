@@ -1,0 +1,8 @@
+/target/
+**/*.rs.bk
+*.pdb
+.env
+*.db
+*.db-shm
+*.db-wal
+quotes.db*
