@@ -211,6 +211,76 @@ cargo clippy
 cargo fmt
 ```
 
+## 🤖 Використання в ботах (Telegram/Discord)
+
+### БЕЗ красивого виводу - тільки дані
+
+Якщо ви хочете використовувати парсер у ботах, вам **НЕ потрібен** CLI з красивим виводом.
+Використовуйте бібліотеку напряму - вона повертає структуровані дані:
+
+```rust
+use dtek_parse::DTEKParser;
+use anyhow::Result;
+
+// Ваша функція в боті
+fn get_schedule_json(group: &str) -> Result<String> {
+    // Парсер сам зробить curl запит всередині
+    // НЕ потрібно нічого робити вручну!
+    let mut parser = DTEKParser::new()?;
+    let data = parser.get_group_schedule(group)?;
+
+    // Отримайте JSON для Telegram/Discord
+    let json = serde_json::to_string_pretty(&data)?;
+    Ok(json)
+}
+
+fn main() -> Result<()> {
+    // Користувач написав /schedule GPV3.2
+    let json = get_schedule_json("GPV3.2")?;
+
+    // Відправте JSON в Telegram/Discord
+    // send_to_telegram(&json);
+    println!("{}", json);
+
+    Ok(())
+}
+```
+
+### Запуск прикладів для ботів
+
+```bash
+# Приклад з різними форматами для ботів
+cargo run --example bot_integration
+
+# Мінімальний приклад без консольного виводу
+cargo run --example simple_bot
+```
+
+Дивіться повні приклади в папці `examples/`:
+- `examples/bot_integration.rs` - формати для Telegram/Discord
+- `examples/simple_bot.rs` - мінімальний приклад
+
+### Структура даних
+
+Бібліотека повертає `ScheduleData` (вже має `#[derive(Serialize)]`):
+
+```rust
+pub struct ScheduleData {
+    pub address: Option<String>,      // "м. Дніпро, вул. Конотопська, 169"
+    pub group: String,                 // "GPV3.2"
+    pub group_name: String,            // "GPV3.2"
+    pub update_time: String,           // "18.12.2025 20:00"
+    pub schedules: HashMap<String, Vec<(String, String)>>,
+}
+```
+
+Можете одразу серіалізувати в JSON:
+
+```rust
+let json = serde_json::to_string(&data)?;  // Компактний JSON
+let json = serde_json::to_string_pretty(&data)?;  // Форматований JSON
+```
+
 ## 📝 Приклади
 
 ### Отримання графіка та збереження в JSON

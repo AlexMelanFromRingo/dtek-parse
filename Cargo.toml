@@ -15,6 +15,14 @@ path = "src/lib.rs"
 name = "dtek-parse"
 path = "src/main.rs"
 
+[[example]]
+name = "bot_integration"
+path = "examples/bot_integration.rs"
+
+[[example]]
+name = "simple_bot"
+path = "examples/simple_bot.rs"
+
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
