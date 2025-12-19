@@ -742,10 +742,10 @@ class DTEKParser:
             'yes': '❌ ВІДКЛЮЧЕННЯ',
             'no': '✅ Є СВІТЛО',
             'maybe': '⚠️ Можливе відключення',
-            'first': '⏰ ВІДКЛЮЧЕННЯ (перші 30 хв)',
-            'second': '⏰ ВІДКЛЮЧЕННЯ (другі 30 хв)',
-            'mfirst': '⚠️ Можливе відключення (перші 30 хв)',
-            'msecond': '⚠️ Можливе відключення (другі 30 хв)',
+            'first': '✅ Є СВІТЛО (перші 30 хв, відключення другі 30 хв)',
+            'second': '✅ Є СВІТЛО (другі 30 хв, відключення перші 30 хв)',
+            'mfirst': '✅ Є СВІТЛО (перші 30 хв, можливе відключення другі 30 хв)',
+            'msecond': '✅ Є СВІТЛО (другі 30 хв, можливе відключення перші 30 хв)',
         }
 
         for hour in range(1, 25):
@@ -807,7 +807,7 @@ class DTEKParser:
             'success': True,
             'group': group,
             'group_name': self.preset_data.get('sch_names', {}).get(group, group),
-            'update_time': self.fact_data.get('updateFact', 'Невідомо'),
+            'update_time': self.fact_data.get('update', 'Невідомо'),
             'schedules': schedules
         }
 
