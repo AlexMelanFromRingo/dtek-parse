@@ -11,6 +11,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::process::Command;
 
+#[cfg(feature = "browser")]
+use headless_chrome::{Browser, LaunchOptions};
+
 /// Kyiv timezone offset (UTC+2)
 const KYIV_OFFSET: i64 = 2 * 3600;
 
@@ -188,6 +191,102 @@ impl DTEKParser {
         Err(anyhow!("Failed to fetch page after {} attempts", MAX_RETRIES))
     }
 
+    /// Fetch page using headless Chrome browser
+    /// This method executes JavaScript and bypasses reese84 challenge
+    #[cfg(feature = "browser")]
+    fn fetch_page_browser(&self) -> Result<String> {
+        eprintln!("🌐 Використовую headless Chrome для обходу reese84 challenge...");
+
+        const MIN_VALID_SIZE: usize = 10_000;
+        const MAX_RETRIES: usize = 3;
+
+        for attempt in 0..MAX_RETRIES {
+            if attempt > 0 {
+                let delay = (attempt * 3) as u64;
+                eprintln!("⏳ Затримка {} сек перед спробою {}...", delay, attempt + 1);
+                std::thread::sleep(std::time::Duration::from_secs(delay));
+            }
+
+            eprintln!("🔧 Запуск headless Chrome (спроба {}/{})...", attempt + 1, MAX_RETRIES);
+
+            // Launch headless browser with options similar to real Chrome
+            let browser = Browser::new(LaunchOptions {
+                headless: true,
+                window_size: Some((1920, 1080)),
+                // Disable automation detection
+                enable_gpu: false,
+                ..Default::default()
+            }).context("Failed to launch headless Chrome")?;
+
+            // Create a new tab
+            let tab = browser.new_tab().context("Failed to create browser tab")?;
+
+            // Navigate to the URL
+            eprintln!("📄 Навігація до {}...", self.base_url);
+            tab.navigate_to(&self.base_url)
+                .context("Failed to navigate to DTEK page")?;
+
+            // Wait for JavaScript to execute (reese84 challenge)
+            eprintln!("⏳ Очікування виконання JavaScript (reese84 challenge)...");
+            std::thread::sleep(std::time::Duration::from_secs(5));
+
+            // Wait for the DisconSchedule object to appear in the page
+            // This indicates that the page has loaded and JavaScript has executed
+            match tab.wait_for_element("script:contains('DisconSchedule')") {
+                Ok(_) => eprintln!("✅ DisconSchedule знайдено на сторінці"),
+                Err(_) => eprintln!("⚠️ DisconSchedule не знайдено явно, але продовжуємо..."),
+            }
+
+            // Additional wait for any dynamic content
+            std::thread::sleep(std::time::Duration::from_secs(2));
+
+            // Get the final HTML after JavaScript execution
+            let html = tab.get_content()
+                .context("Failed to get page content")?;
+
+            // Validate the response
+            if html.len() < MIN_VALID_SIZE || !html.contains("DisconSchedule") {
+                eprintln!("⚠️ Спроба {}/{}: отримано {} байт, DisconSchedule: {}",
+                    attempt + 1, MAX_RETRIES, html.len(), html.contains("DisconSchedule"));
+
+                if attempt < MAX_RETRIES - 1 {
+                    continue;
+                }
+
+                return Err(anyhow!(
+                    "Не вдалось отримати дані після {} спроб через headless browser. Розмір: {} байт",
+                    MAX_RETRIES, html.len()
+                ));
+            }
+
+            // Success!
+            eprintln!("✅ Успішно отримано {} байт даних через headless Chrome", html.len());
+            return Ok(html);
+        }
+
+        Err(anyhow!("Failed to fetch page using browser after {} attempts", MAX_RETRIES))
+    }
+
+    /// Fetch page with automatic fallback: try curl first, then browser if available
+    fn fetch_page(&self) -> Result<String> {
+        // Try curl first (faster if it works)
+        match self.fetch_page_curl() {
+            Ok(html) => Ok(html),
+            Err(curl_err) => {
+                #[cfg(feature = "browser")]
+                {
+                    eprintln!("⚠️ curl не спрацював: {}", curl_err);
+                    eprintln!("🔄 Перемикаюсь на headless browser як fallback...");
+                    self.fetch_page_browser()
+                }
+                #[cfg(not(feature = "browser"))]
+                {
+                    Err(curl_err)
+                }
+            }
+        }
+    }
+
     /// Extract a JSON object from a string, balancing braces
     fn extract_json_object(s: &str) -> Option<&str> {
         let start = s.find('{')?;
@@ -270,7 +369,7 @@ impl DTEKParser {
 
     /// Get available groups
     pub fn list_groups(&mut self) -> Result<Vec<String>> {
-        let html = self.fetch_page_curl()?;
+        let html = self.fetch_page()?;
         self.extract_javascript_data(&html)?;
 
         let data = self.fact_data.get("data")
@@ -309,7 +408,7 @@ impl DTEKParser {
 
     /// Get schedule for a specific group
     pub fn get_group_schedule(&mut self, group: &str) -> Result<ScheduleData> {
-        let html = self.fetch_page_curl()?;
+        let html = self.fetch_page()?;
         self.extract_javascript_data(&html)?;
 
         let data = self.fact_data.get("data")
@@ -441,7 +540,7 @@ impl DTEKParser {
 
     /// Get outage schedule for an address
     pub fn get_outage_info(&mut self, city: &str, street: &str, house_num: &str) -> Result<ScheduleData> {
-        let html = self.fetch_page_curl()?;
+        let html = self.fetch_page()?;
         self.extract_javascript_data(&html)?;
 
         let group = self.find_address_group(city, street, house_num)?;
