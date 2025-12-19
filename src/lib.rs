@@ -72,22 +72,32 @@ impl DTEKParser {
         })
     }
 
-    /// Fetch page HTML using curl to bypass Incapsula
-    /// Uses multi-step approach with session warming and exponential backoff
+    /// Fetch page HTML using curl-impersonate to bypass Incapsula
+    /// Uses Chrome 116 TLS fingerprint for better success rate
     fn fetch_page_curl(&self) -> Result<String> {
         const MIN_VALID_SIZE: usize = 10_000;
         const MAX_RETRIES: usize = 15;
+
+        // Спробуємо знайти curl-impersonate, якщо немає - використаємо звичайний curl
+        let curl_cmd = if std::path::Path::new("/usr/local/bin/curl_chrome116").exists() {
+            "/usr/local/bin/curl_chrome116"
+        } else {
+            "curl"
+        };
+
+        if curl_cmd.contains("chrome116") {
+            eprintln!("🔧 Використовую curl-impersonate (Chrome 116) для кращого обходу Incapsula");
+        }
 
         // Create temporary cookie file
         let cookie_file = std::env::temp_dir().join(format!("dtek_cookies_{}.txt", std::process::id()));
         let cookie_path = cookie_file.to_str().ok_or_else(|| anyhow!("Invalid cookie path"))?;
 
         for attempt in 0..MAX_RETRIES {
-            // Експоненціальна затримка між спробами з рандомізацією
+            // Експоненціальна затримка між спробами (тільки після невдач)
             if attempt > 0 {
-                let base_delay = std::cmp::min(attempt * 3, 20);
-                // Додаємо рандомний компонент (0-3 сек) для більш природної поведінки
-                let random_extra = (std::process::id() % 4) as u64;
+                let base_delay = std::cmp::min(attempt * 2, 15);
+                let random_extra = (std::process::id() % 3) as u64;
                 let delay = base_delay as u64 + random_extra;
                 eprintln!("⏳ Затримка {} сек перед спробою {}...", delay, attempt + 1);
                 std::thread::sleep(std::time::Duration::from_secs(delay));
@@ -100,66 +110,33 @@ impl DTEKParser {
             if need_warmup {
                 eprintln!("🔐 Створення сесії з Incapsula (спроба {}/{})...", attempt + 1, MAX_RETRIES);
 
-                // Warmup 1: HEAD запит
-                let _ = Command::new("curl")
+                // Warmup запит - curl-impersonate автоматично додає правильні заголовки
+                let _ = Command::new(curl_cmd)
                     .arg("-s")
                     .arg("-I")
                     .arg("-L")
                     .arg(&self.base_url)
                     .arg("-c").arg(cookie_path)
-                    .arg("-H").arg("User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-                    .arg("-H").arg("Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-                    .arg("-H").arg("Accept-Language: uk-UA,uk;q=0.9")
                     .output();
 
-                // Чекаємо 5-8 секунд з рандомізацією - критично важливо для Incapsula
-                let warmup_delay = 5 + ((std::process::id() % 4) as u64);
-                eprintln!("⏳ Очікування {} секунд (імітація браузера)...", warmup_delay);
-                std::thread::sleep(std::time::Duration::from_secs(warmup_delay));
-
-                // Warmup 2: Легкий GET запит
-                let _ = Command::new("curl")
-                    .arg("-s")
-                    .arg("-L")
-                    .arg(&self.base_url)
-                    .arg("-b").arg(cookie_path)
-                    .arg("-c").arg(cookie_path)
-                    .arg("-H").arg("User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-                    .arg("-H").arg("Accept: text/html,application/xhtml+xml,application/xml;q=0.9")
-                    .output();
-
-                // Ще одна затримка з рандомізацією
-                let extra_delay = 3 + ((std::process::id() % 3) as u64);
-                eprintln!("⏳ Додаткова затримка {} секунди...", extra_delay);
-                std::thread::sleep(std::time::Duration::from_secs(extra_delay));
+                // Мінімальна затримка для імітації браузера
+                eprintln!("⏳ Очікування 2 секунди...");
+                std::thread::sleep(std::time::Duration::from_secs(2));
             }
 
-            // КРОК 2: Основний запит з усіма заголовками
-            let output = Command::new("curl")
+            // КРОК 2: Основний запит
+            // curl-impersonate автоматично встановлює правильні TLS, HTTP/2 та Chrome заголовки
+            let output = Command::new(curl_cmd)
                 .arg("-s")
                 .arg("-L")
                 .arg("--compressed")
                 .arg(&self.base_url)
                 .arg("-b").arg(cookie_path)
                 .arg("-c").arg(cookie_path)
-                // Повні заголовки Chrome
-                .arg("-H").arg("Host: www.dtek-dnem.com.ua")
-                .arg("-H").arg("User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-                .arg("-H").arg("Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7")
+                // Додаємо тільки Accept-Language для українського контенту
                 .arg("-H").arg("Accept-Language: uk-UA,uk;q=0.9,en-US;q=0.8,en;q=0.7")
-                .arg("-H").arg("Accept-Encoding: gzip, deflate, br")
-                .arg("-H").arg("Connection: keep-alive")
-                .arg("-H").arg("Upgrade-Insecure-Requests: 1")
-                .arg("-H").arg("Sec-Fetch-Dest: document")
-                .arg("-H").arg("Sec-Fetch-Mode: navigate")
-                .arg("-H").arg("Sec-Fetch-Site: none")
-                .arg("-H").arg("Sec-Fetch-User: ?1")
-                .arg("-H").arg("Cache-Control: max-age=0")
-                .arg("-H").arg("sec-ch-ua: \"Not_A Brand\";v=\"8\", \"Chromium\";v=\"120\", \"Google Chrome\";v=\"120\"")
-                .arg("-H").arg("sec-ch-ua-mobile: ?0")
-                .arg("-H").arg("sec-ch-ua-platform: \"Windows\"")
                 .output()
-                .context("Failed to execute curl command")?;
+                .context("Failed to execute curl-impersonate")?;
 
             if !output.status.success() {
                 eprintln!("❌ Помилка curl: {}", String::from_utf8_lossy(&output.stderr));
