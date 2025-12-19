@@ -16,32 +16,64 @@
 
 ## 📋 Вимоги
 
+### Програмне забезпечення
+
+- **Python 3.7+**
+- **curl** - для обходу Incapsula захисту (встановлено за замовчуванням на Linux/macOS)
+
+### Python бібліотеки
+
 ```bash
-Python 3.7+
 requests >= 2.31.0
 beautifulsoup4 >= 4.12.0
 ```
 
 ## 🔧 Встановлення
 
-```bash
-# Клонуйте репозиторій або скопіюйте файли
-git clone <your-repo>
-cd dtek-parse
+### Крок 1: Клонування репозиторію
 
-# Встановіть залежності
+```bash
+git clone https://github.com/AlexMelanFromRingo/dtek-parse.git
+cd dtek-parse
+```
+
+### Крок 2: Встановлення залежностей
+
+```bash
 pip install -r requirements.txt
 ```
 
-### ⚠️ Важливо: Сайт захищений Incapsula
-
-Сайт ДТЕК використовує **Incapsula** (Imperva) антибот захист. Для роботи парсера **обов'язково** потрібно встановити `cloudscraper`:
+Або встановіть вручну:
 
 ```bash
-pip install cloudscraper
+pip install requests beautifulsoup4
 ```
 
-Без `cloudscraper` парсер не зможе завантажити дані, оскільки звичайні HTTP запити блокуються.
+### Крок 3: Перевірка встановлення curl
+
+⚠️ **Важливо**: Сайт ДТЕК захищений **Incapsula** (Imperva) антибот системою. Для обходу захисту парсер використовує **curl**.
+
+Перевірте наявність curl:
+
+```bash
+curl --version
+```
+
+Якщо curl не встановлено:
+
+**Ubuntu/Debian:**
+```bash
+sudo apt-get install curl
+```
+
+**macOS:**
+```bash
+brew install curl
+```
+
+**Windows:**
+- Завантажте з https://curl.se/windows/
+- Або використовуйте WSL (Windows Subsystem for Linux)
 
 ## 📖 Використання
 
@@ -180,11 +212,11 @@ info = parser.get_group_schedule("GPV1.1")
 
 | Код | Опис | Символ |
 |-----|------|--------|
-| `no` | Є світло | ✅ |
-| `yes` | Відключення | ❌ |
+| `yes` | Є світло | ✅ |
+| `no` | Відключення | ❌ |
 | `maybe` | Можливе відключення | ⚠️ |
-| `first` | Відключення (перші 30 хв години) | ⏰ |
-| `second` | Відключення (другі 30 хв години) | ⏰ |
+| `first` | Відключення (перші 30 хв), світло (другі 30 хв) | ⚠️ |
+| `second` | Світло (перші 30 хв), відключення (другі 30 хв) | ⚠️ |
 | `mfirst` | Можливе відключення (перші 30 хв) | ⚠️ |
 | `msecond` | Можливе відключення (другі 30 хв) | ⚠️ |
 

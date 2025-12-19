@@ -653,6 +653,12 @@ class DTEKParser:
 
             return result
 
+        except json.JSONDecodeError as e:
+            error_msg = f"Помилка парсингу AJAX відповіді: {e}"
+            if self.debug:
+                print(f"❌ {error_msg}")
+                print(f"   Відповідь сервера: {response.text[:500]}")
+            raise Exception(error_msg)
         except requests.RequestException as e:
             if self.debug and hasattr(e, 'response') and e.response is not None:
                 print(f"❌ HTTP {e.response.status_code}: {e.response.text[:200]}")
