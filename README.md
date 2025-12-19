@@ -112,9 +112,111 @@ fn main() {
 }
 ```
 
+### Інтерактивні боти з кнопками 🎮
+
+**Новинка!** Використовуйте сучасні можливості Telegram та Discord з інтерактивними кнопками для вибору груп:
+
+#### Telegram Bot з Inline кнопками
+
+```rust
+use dtek_parse::DTEKParser;
+use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup};
+
+async fn show_groups_menu(bot: Bot, msg: Message) -> Result<()> {
+    // Отримуємо список груп
+    let groups = tokio::task::spawn_blocking(|| {
+        let mut parser = DTEKParser::new()?;
+        parser.list_groups()
+    }).await??;
+
+    // Створюємо кнопки - 3 групи в ряд
+    let mut keyboard = vec![];
+    let mut row = vec![];
+
+    for (i, group) in groups.iter().enumerate() {
+        row.push(InlineKeyboardButton::callback(group, format!("group:{}", group)));
+
+        if (i + 1) % 3 == 0 || i == groups.len() - 1 {
+            keyboard.push(row);
+            row = vec![];
+        }
+    }
+
+    // Відправляємо повідомлення з кнопками
+    bot.send_message(msg.chat.id, "⚡ Виберіть вашу групу відключень:")
+        .reply_markup(InlineKeyboardMarkup::new(keyboard))
+        .await?;
+
+    Ok(())
+}
+
+// Обробник натискання кнопки
+async fn handle_callback(bot: Bot, q: CallbackQuery) -> Result<()> {
+    if let Some(data) = &q.data {
+        if let Some(group) = data.strip_prefix("group:") {
+            // Отримуємо графік
+            let schedule = tokio::task::spawn_blocking(move || {
+                let mut parser = DTEKParser::new()?;
+                parser.get_group_schedule(group)
+            }).await??;
+
+            // Відправляємо графік
+            bot.answer_callback_query(&q.id).await?;
+            // ... форматуємо та відправляємо schedule
+        }
+    }
+    Ok(())
+}
+```
+
+#### Discord Bot з кнопками
+
+```rust
+use serenity::all::{CreateActionRow, CreateButton, ButtonStyle};
+use dtek_parse::DTEKParser;
+
+async fn groups_command(ctx: &Context, command: &CommandInteraction) -> Result<()> {
+    // Отримуємо список груп
+    let groups = tokio::task::spawn_blocking(|| {
+        let mut parser = DTEKParser::new()?;
+        parser.list_groups()
+    }).await??;
+
+    // Створюємо кнопки - max 5 в ряд
+    let mut components = vec![];
+    let mut row = vec![];
+
+    for (i, group) in groups.iter().enumerate().take(25) { // Discord limit
+        row.push(CreateButton::new(format!("group_{}", group))
+            .label(group)
+            .style(ButtonStyle::Primary));
+
+        if (i + 1) % 5 == 0 || i == groups.len() - 1 {
+            components.push(CreateActionRow::Buttons(row));
+            row = vec![];
+        }
+    }
+
+    // Відправляємо з кнопками
+    command.create_response(&ctx.http, CreateInteractionResponse::Message(
+        CreateInteractionResponseMessage::new()
+            .content("⚡ Виберіть вашу групу відключень:")
+            .components(components)
+    )).await?;
+
+    Ok(())
+}
+```
+
 ### Приклади
 
 ```bash
+# Telegram бот з інтерактивними кнопками
+cargo run --example telegram_interactive_bot
+
+# Discord бот з інтерактивними кнопками
+cargo run --example discord_interactive_bot
+
 # Приклад з форматуванням для Telegram/Discord
 cargo run --example bot_integration
 
@@ -123,6 +225,8 @@ cargo run --example simple_bot
 ```
 
 Дивіться повні приклади в `examples/`:
+- `telegram_interactive_bot.rs` - **Telegram з інтерактивними кнопками** ⭐
+- `discord_interactive_bot.rs` - **Discord з інтерактивними кнопками** ⭐
 - `bot_integration.rs` - різні формати для ботів
 - `simple_bot.rs` - мінімальний приклад
 
