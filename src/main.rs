@@ -476,23 +476,29 @@ async fn send_schedule_embed(ctx: Context<'_>, data: dtek_parse::ScheduleData) -
     }
     embed = embed.field("🔢 Група", &data.group, true);
 
-    for (i, (date, hours)) in data.schedules.iter().enumerate() {
+    // Сортуємо дати (сьогодні -> завтра -> ...)
+    let mut dates: Vec<_> = data.schedules.keys().collect();
+    dates.sort();
+
+    for (i, date) in dates.iter().enumerate() {
         if i >= 2 {
             break;
         }
 
-        // Створюємо табличне форматування як у CLI (повний формат!)
-        let mut schedule_text = String::from("```\n");
-        schedule_text.push_str("----------------------------------------------------------------------\n");
+        if let Some(hours) = data.schedules.get(*date) {
+            // Створюємо табличне форматування як у CLI (повний формат!)
+            let mut schedule_text = String::from("```\n");
+            schedule_text.push_str("----------------------------------------------------------------------\n");
 
-        for (time, status) in hours {
-            // Використовуємо повний текст статусу як у CLI, а не скорочений
-            schedule_text.push_str(&format!("{:<15} | {}\n", time, status));
+            for (time, status) in hours {
+                // Використовуємо повний текст статусу як у CLI, а не скорочений
+                schedule_text.push_str(&format!("{:<15} | {}\n", time, status));
+            }
+
+            schedule_text.push_str("```");
+
+            embed = embed.field(format!("📅 {}", date), schedule_text, false);
         }
-
-        schedule_text.push_str("```");
-
-        embed = embed.field(format!("📅 {}", date), schedule_text, false);
     }
 
     ctx.send(poise::CreateReply::default().embed(embed)).await?;
@@ -597,21 +603,26 @@ async fn handle_button_interaction(
 
                 embed = embed.field("🔢 Група", &schedule_data.group, true);
 
-                for (i, (date, hours)) in schedule_data.schedules.iter().enumerate() {
+                // Сортуємо дати (сьогодні -> завтра -> ...)
+                let mut dates: Vec<_> = schedule_data.schedules.keys().collect();
+                dates.sort();
+
+                for (i, date) in dates.iter().enumerate() {
                     if i >= 2 { break; }
 
-                    // Табличний формат як у CLI!
-                    let mut schedule_text = String::from("```\n");
-                    schedule_text.push_str("----------------------------------------------------------------------\n");
+                    if let Some(hours) = schedule_data.schedules.get(*date) {
+                        // ТАБЛИЧНИЙ ФОРМАТ як у CLI!
+                        let mut schedule_text = String::from("```\n");
+                        schedule_text.push_str("----------------------------------------------------------------------\n");
 
-                    for (time, status) in hours {
-                        // Повний текст статусу
-                        schedule_text.push_str(&format!("{:<15} | {}\n", time, status));
+                        for (time, status) in hours {
+                            schedule_text.push_str(&format!("{:<15} | {}\n", time, status));
+                        }
+
+                        schedule_text.push_str("```");
+
+                        embed = embed.field(format!("📅 {}", date), schedule_text, false);
                     }
-
-                    schedule_text.push_str("```");
-
-                    embed = embed.field(format!("📅 {}", date), schedule_text, false);
                 }
 
                 interaction.create_followup(
