@@ -73,52 +73,71 @@ impl DTEKParser {
     }
 
     /// Fetch page HTML using curl to bypass Incapsula
-    /// Uses two-step approach: first request to get cookies, second to get actual data
+    /// Uses multi-step approach with session warming and exponential backoff
     fn fetch_page_curl(&self) -> Result<String> {
         const MIN_VALID_SIZE: usize = 10_000;
-        const MAX_RETRIES: usize = 10;
+        const MAX_RETRIES: usize = 15;
 
         // Create temporary cookie file
         let cookie_file = std::env::temp_dir().join(format!("dtek_cookies_{}.txt", std::process::id()));
         let cookie_path = cookie_file.to_str().ok_or_else(|| anyhow!("Invalid cookie path"))?;
 
         for attempt in 0..MAX_RETRIES {
-            // Експоненціальна затримка
+            // Експоненціальна затримка між спробами
             if attempt > 0 {
-                let delay = std::cmp::min(attempt * 2, 10);
+                let delay = std::cmp::min(attempt * 2, 15);
+                eprintln!("⏳ Затримка {} сек перед спробою {}...", delay, attempt + 1);
                 std::thread::sleep(std::time::Duration::from_secs(delay as u64));
             }
 
-            // КРОК 1: Warmup запит для отримання cookies (імітуємо перший візит браузера)
-            if attempt == 0 {
-                eprintln!("🔐 Отримання сесії від Incapsula...");
-                let warmup = Command::new("curl")
+            // Перевіряємо чи потрібно оновити сесію
+            let need_warmup = attempt == 0 || !cookie_file.exists();
+
+            // КРОК 1: Warmup запит для отримання cookies
+            if need_warmup {
+                eprintln!("🔐 Створення сесії з Incapsula (спроба {}/{})...", attempt + 1, MAX_RETRIES);
+
+                // Warmup 1: HEAD запит
+                let _ = Command::new("curl")
                     .arg("-s")
-                    .arg("-I") // Тільки заголовки
+                    .arg("-I")
                     .arg("-L")
                     .arg(&self.base_url)
-                    .arg("-c").arg(cookie_path) // Зберегти cookies
+                    .arg("-c").arg(cookie_path)
                     .arg("-H").arg("User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
                     .arg("-H").arg("Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
                     .arg("-H").arg("Accept-Language: uk-UA,uk;q=0.9")
-                    .arg("-H").arg("Connection: keep-alive")
                     .output();
 
-                if warmup.is_ok() {
-                    // Чекаємо 1-2 секунди щоб імітувати поведінку браузера
-                    std::thread::sleep(std::time::Duration::from_millis(1500));
-                }
+                // Чекаємо 3-5 секунд - критично важливо для Incapsula
+                eprintln!("⏳ Очікування 4 секунди (імітація браузера)...");
+                std::thread::sleep(std::time::Duration::from_secs(4));
+
+                // Warmup 2: Легкий GET запит
+                let _ = Command::new("curl")
+                    .arg("-s")
+                    .arg("-L")
+                    .arg(&self.base_url)
+                    .arg("-b").arg(cookie_path)
+                    .arg("-c").arg(cookie_path)
+                    .arg("-H").arg("User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+                    .arg("-H").arg("Accept: text/html,application/xhtml+xml,application/xml;q=0.9")
+                    .output();
+
+                // Ще одна затримка
+                eprintln!("⏳ Додаткова затримка 2 секунди...");
+                std::thread::sleep(std::time::Duration::from_secs(2));
             }
 
-            // КРОК 2: Основний запит з cookies
+            // КРОК 2: Основний запит з усіма заголовками
             let output = Command::new("curl")
                 .arg("-s")
                 .arg("-L")
                 .arg("--compressed")
                 .arg(&self.base_url)
-                .arg("-b").arg(cookie_path) // Використати cookies
-                .arg("-c").arg(cookie_path) // Оновити cookies
-                // Реалістичні заголовки в правильному порядку
+                .arg("-b").arg(cookie_path)
+                .arg("-c").arg(cookie_path)
+                // Повні заголовки Chrome
                 .arg("-H").arg("Host: www.dtek-dnem.com.ua")
                 .arg("-H").arg("User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
                 .arg("-H").arg("Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7")
@@ -138,8 +157,8 @@ impl DTEKParser {
                 .context("Failed to execute curl command")?;
 
             if !output.status.success() {
+                eprintln!("❌ Помилка curl: {}", String::from_utf8_lossy(&output.stderr));
                 if attempt == MAX_RETRIES - 1 {
-                    // Видаляємо cookie file
                     let _ = std::fs::remove_file(&cookie_file);
                     return Err(anyhow!(
                         "curl failed after {} attempts: {}",
@@ -147,48 +166,36 @@ impl DTEKParser {
                         String::from_utf8_lossy(&output.stderr)
                     ));
                 }
+                // Видаляємо cookies для наступної спроби
+                let _ = std::fs::remove_file(&cookie_file);
                 continue;
             }
 
             let html = String::from_utf8_lossy(&output.stdout).to_string();
 
-            // Перевірка розміру
-            if html.len() < MIN_VALID_SIZE {
-                if attempt < MAX_RETRIES - 1 {
-                    eprintln!("⚠️ Спроба {}/{}: отримано {} байт (очікується > {}), повторюю...",
-                        attempt + 1, MAX_RETRIES, html.len(), MIN_VALID_SIZE);
+            // Перевірка розміру та наявності даних
+            if html.len() < MIN_VALID_SIZE || !html.contains("DisconSchedule") {
+                eprintln!("⚠️ Спроба {}/{}: отримано {} байт, DisconSchedule: {}",
+                    attempt + 1, MAX_RETRIES, html.len(), html.contains("DisconSchedule"));
 
-                    // На 3-й спробі пробуємо оновити cookies
-                    if attempt == 2 {
-                        eprintln!("🔄 Оновлення сесії...");
+                if attempt < MAX_RETRIES - 1 {
+                    // Кожні 2 спроби оновлюємо сесію
+                    if attempt % 2 == 1 {
+                        eprintln!("🔄 Оновлення сесії - видаляю cookies...");
                         let _ = std::fs::remove_file(&cookie_file);
                     }
                     continue;
                 }
-            }
 
-            // Перевірка наявності даних
-            if !html.contains("DisconSchedule") {
-                if attempt < MAX_RETRIES - 1 {
-                    eprintln!("⚠️ Спроба {}/{}: DisconSchedule не знайдено, повторюю...",
-                        attempt + 1, MAX_RETRIES);
-
-                    // Кожні 3 спроби оновлюємо cookies
-                    if attempt % 3 == 2 {
-                        eprintln!("🔄 Оновлення сесії...");
-                        let _ = std::fs::remove_file(&cookie_file);
-                    }
-                    continue;
-                }
-                // Видаляємо cookie file
+                // Остання спроба - помилка
                 let _ = std::fs::remove_file(&cookie_file);
                 return Err(anyhow!(
-                    "DisconSchedule not found in HTML after {} attempts. Можливо, сайт тимчасово недоступний або змінився формат. Спробуйте через 1-2 хвилини.",
+                    "Не вдалось отримати дані після {} спроб. Incapsula блокує запити. Спробуйте через 2-3 хвилини.",
                     MAX_RETRIES
                 ));
             }
 
-            // Успіх! Видаляємо cookie file
+            // Успіх!
             let _ = std::fs::remove_file(&cookie_file);
             eprintln!("✅ Успішно отримано {} байт даних", html.len());
             return Ok(html);
