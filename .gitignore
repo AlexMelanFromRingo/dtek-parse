@@ -1,40 +1,21 @@
-# Debug and test files
-debug_page.html
-*.html.debug
-test_*.html
-test_*.log
-shutdowns
+# Rust
+/target/
+Cargo.lock
+**/*.rs.bk
+*.pdb
 
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
+# Database
+*.db
+*.db-shm
+*.db-wal
 
-# Virtual environments
-venv/
-ENV/
-env/
+# Environment
+.env
+.env.local
 
 # IDE
-.vscode/
 .idea/
+.vscode/
 *.swp
 *.swo
 *~
@@ -45,7 +26,3 @@ Thumbs.db
 
 # Logs
 *.log
-
-# Rust
-/target/
-Cargo.lock

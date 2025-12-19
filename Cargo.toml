@@ -1,36 +1,26 @@
 [package]
-name = "dtek-parse"
+name = "dtek-discord-bot"
 version = "0.1.0"
 edition = "2021"
-authors = ["DTEK Parser Contributors"]
-description = "DTEK power outage schedule parser library"
-license = "MIT"
-repository = "https://github.com/AlexMelanFromRingo/dtek-parse"
-
-[lib]
-name = "dtek_parse"
-path = "src/lib.rs"
-
-[[bin]]
-name = "dtek-parse"
-path = "src/main.rs"
-
-[[example]]
-name = "bot_integration"
-path = "examples/bot_integration.rs"
-
-[[example]]
-name = "simple_bot"
-path = "examples/simple_bot.rs"
 
 [dependencies]
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-regex = "1.10"
-reqwest = { version = "0.11", features = ["blocking", "cookies"] }
-chrono = "0.4"
-anyhow = "1.0"
-thiserror = "1.0"
-clap = { version = "4.5", features = ["derive"] }
+# Discord framework
+poise = "0.6"
+serenity = { version = "0.12", default-features = false, features = ["client", "gateway", "rustls_backend", "model"] }
 
-[dev-dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Database
+sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "sqlite"] }
+
+# DTEK parser
+dtek-parse = { git = "https://github.com/AlexMelanFromRingo/dtek-parse.git", branch = "claude/rust-port-curl-only-xllUi" }
+
+# Utils
+dotenvy = "0.15"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+# Time для кешування
+chrono = "0.4"
