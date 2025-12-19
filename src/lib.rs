@@ -73,52 +73,74 @@ impl DTEKParser {
     }
 
     /// Fetch page HTML using curl to bypass Incapsula
+    /// Uses two-step approach: first request to get cookies, second to get actual data
     fn fetch_page_curl(&self) -> Result<String> {
         const MIN_VALID_SIZE: usize = 10_000;
-        const MAX_RETRIES: usize = 10; // Збільшено з 5 до 10
+        const MAX_RETRIES: usize = 10;
+
+        // Create temporary cookie file
+        let cookie_file = std::env::temp_dir().join(format!("dtek_cookies_{}.txt", std::process::id()));
+        let cookie_path = cookie_file.to_str().ok_or_else(|| anyhow!("Invalid cookie path"))?;
 
         for attempt in 0..MAX_RETRIES {
-            // Експоненціальна затримка: 0, 2, 4, 6, 8, 10... секунд
+            // Експоненціальна затримка
             if attempt > 0 {
                 let delay = std::cmp::min(attempt * 2, 10);
                 std::thread::sleep(std::time::Duration::from_secs(delay as u64));
             }
 
+            // КРОК 1: Warmup запит для отримання cookies (імітуємо перший візит браузера)
+            if attempt == 0 {
+                eprintln!("🔐 Отримання сесії від Incapsula...");
+                let warmup = Command::new("curl")
+                    .arg("-s")
+                    .arg("-I") // Тільки заголовки
+                    .arg("-L")
+                    .arg(&self.base_url)
+                    .arg("-c").arg(cookie_path) // Зберегти cookies
+                    .arg("-H").arg("User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+                    .arg("-H").arg("Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+                    .arg("-H").arg("Accept-Language: uk-UA,uk;q=0.9")
+                    .arg("-H").arg("Connection: keep-alive")
+                    .output();
+
+                if warmup.is_ok() {
+                    // Чекаємо 1-2 секунди щоб імітувати поведінку браузера
+                    std::thread::sleep(std::time::Duration::from_millis(1500));
+                }
+            }
+
+            // КРОК 2: Основний запит з cookies
             let output = Command::new("curl")
                 .arg("-s")
                 .arg("-L")
-                .arg("--compressed") // Підтримка gzip/deflate
+                .arg("--compressed")
                 .arg(&self.base_url)
-                // Більш реалістичний User-Agent з повною версією Chrome
-                .arg("-H")
-                .arg("User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-                .arg("-H")
-                .arg("Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7")
-                .arg("-H")
-                .arg("Accept-Language: uk-UA,uk;q=0.9,en-US;q=0.8,en;q=0.7")
-                .arg("-H")
-                .arg("Accept-Encoding: gzip, deflate, br")
-                .arg("-H")
-                .arg("DNT: 1") // Do Not Track
-                .arg("-H")
-                .arg("Connection: keep-alive")
-                .arg("-H")
-                .arg("Upgrade-Insecure-Requests: 1")
-                .arg("-H")
-                .arg("Sec-Fetch-Dest: document")
-                .arg("-H")
-                .arg("Sec-Fetch-Mode: navigate")
-                .arg("-H")
-                .arg("Sec-Fetch-Site: none")
-                .arg("-H")
-                .arg("Sec-Fetch-User: ?1")
-                .arg("-H")
-                .arg("Cache-Control: max-age=0")
+                .arg("-b").arg(cookie_path) // Використати cookies
+                .arg("-c").arg(cookie_path) // Оновити cookies
+                // Реалістичні заголовки в правильному порядку
+                .arg("-H").arg("Host: www.dtek-dnem.com.ua")
+                .arg("-H").arg("User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+                .arg("-H").arg("Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7")
+                .arg("-H").arg("Accept-Language: uk-UA,uk;q=0.9,en-US;q=0.8,en;q=0.7")
+                .arg("-H").arg("Accept-Encoding: gzip, deflate, br")
+                .arg("-H").arg("Connection: keep-alive")
+                .arg("-H").arg("Upgrade-Insecure-Requests: 1")
+                .arg("-H").arg("Sec-Fetch-Dest: document")
+                .arg("-H").arg("Sec-Fetch-Mode: navigate")
+                .arg("-H").arg("Sec-Fetch-Site: none")
+                .arg("-H").arg("Sec-Fetch-User: ?1")
+                .arg("-H").arg("Cache-Control: max-age=0")
+                .arg("-H").arg("sec-ch-ua: \"Not_A Brand\";v=\"8\", \"Chromium\";v=\"120\", \"Google Chrome\";v=\"120\"")
+                .arg("-H").arg("sec-ch-ua-mobile: ?0")
+                .arg("-H").arg("sec-ch-ua-platform: \"Windows\"")
                 .output()
                 .context("Failed to execute curl command")?;
 
             if !output.status.success() {
                 if attempt == MAX_RETRIES - 1 {
+                    // Видаляємо cookie file
+                    let _ = std::fs::remove_file(&cookie_file);
                     return Err(anyhow!(
                         "curl failed after {} attempts: {}",
                         MAX_RETRIES,
@@ -130,31 +152,50 @@ impl DTEKParser {
 
             let html = String::from_utf8_lossy(&output.stdout).to_string();
 
-            // Check if response is too small (likely blocked)
+            // Перевірка розміру
             if html.len() < MIN_VALID_SIZE {
                 if attempt < MAX_RETRIES - 1 {
-                    eprintln!("⚠️ Спроба {}/{}: отримано занадто мало даних ({} байт), повторюю...",
-                        attempt + 1, MAX_RETRIES, html.len());
+                    eprintln!("⚠️ Спроба {}/{}: отримано {} байт (очікується > {}), повторюю...",
+                        attempt + 1, MAX_RETRIES, html.len(), MIN_VALID_SIZE);
+
+                    // На 3-й спробі пробуємо оновити cookies
+                    if attempt == 2 {
+                        eprintln!("🔄 Оновлення сесії...");
+                        let _ = std::fs::remove_file(&cookie_file);
+                    }
                     continue;
                 }
             }
 
-            // Check if DisconSchedule exists
+            // Перевірка наявності даних
             if !html.contains("DisconSchedule") {
                 if attempt < MAX_RETRIES - 1 {
                     eprintln!("⚠️ Спроба {}/{}: DisconSchedule не знайдено, повторюю...",
                         attempt + 1, MAX_RETRIES);
+
+                    // Кожні 3 спроби оновлюємо cookies
+                    if attempt % 3 == 2 {
+                        eprintln!("🔄 Оновлення сесії...");
+                        let _ = std::fs::remove_file(&cookie_file);
+                    }
                     continue;
                 }
+                // Видаляємо cookie file
+                let _ = std::fs::remove_file(&cookie_file);
                 return Err(anyhow!(
                     "DisconSchedule not found in HTML after {} attempts. Можливо, сайт тимчасово недоступний або змінився формат. Спробуйте через 1-2 хвилини.",
                     MAX_RETRIES
                 ));
             }
 
+            // Успіх! Видаляємо cookie file
+            let _ = std::fs::remove_file(&cookie_file);
+            eprintln!("✅ Успішно отримано {} байт даних", html.len());
             return Ok(html);
         }
 
+        // Видаляємо cookie file
+        let _ = std::fs::remove_file(&cookie_file);
         Err(anyhow!("Failed to fetch page after {} attempts", MAX_RETRIES))
     }
 
