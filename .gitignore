@@ -1,6 +1,9 @@
-# Debug files
+# Debug and test files
 debug_page.html
 *.html.debug
+test_*.html
+test_*.log
+shutdowns
 
 # Python
 __pycache__/
