@@ -83,11 +83,14 @@ impl DTEKParser {
         let cookie_path = cookie_file.to_str().ok_or_else(|| anyhow!("Invalid cookie path"))?;
 
         for attempt in 0..MAX_RETRIES {
-            // Експоненціальна затримка між спробами
+            // Експоненціальна затримка між спробами з рандомізацією
             if attempt > 0 {
-                let delay = std::cmp::min(attempt * 2, 15);
+                let base_delay = std::cmp::min(attempt * 3, 20);
+                // Додаємо рандомний компонент (0-3 сек) для більш природної поведінки
+                let random_extra = (std::process::id() % 4) as u64;
+                let delay = base_delay as u64 + random_extra;
                 eprintln!("⏳ Затримка {} сек перед спробою {}...", delay, attempt + 1);
-                std::thread::sleep(std::time::Duration::from_secs(delay as u64));
+                std::thread::sleep(std::time::Duration::from_secs(delay));
             }
 
             // Перевіряємо чи потрібно оновити сесію
@@ -109,9 +112,10 @@ impl DTEKParser {
                     .arg("-H").arg("Accept-Language: uk-UA,uk;q=0.9")
                     .output();
 
-                // Чекаємо 3-5 секунд - критично важливо для Incapsula
-                eprintln!("⏳ Очікування 4 секунди (імітація браузера)...");
-                std::thread::sleep(std::time::Duration::from_secs(4));
+                // Чекаємо 5-8 секунд з рандомізацією - критично важливо для Incapsula
+                let warmup_delay = 5 + ((std::process::id() % 4) as u64);
+                eprintln!("⏳ Очікування {} секунд (імітація браузера)...", warmup_delay);
+                std::thread::sleep(std::time::Duration::from_secs(warmup_delay));
 
                 // Warmup 2: Легкий GET запит
                 let _ = Command::new("curl")
@@ -124,9 +128,10 @@ impl DTEKParser {
                     .arg("-H").arg("Accept: text/html,application/xhtml+xml,application/xml;q=0.9")
                     .output();
 
-                // Ще одна затримка
-                eprintln!("⏳ Додаткова затримка 2 секунди...");
-                std::thread::sleep(std::time::Duration::from_secs(2));
+                // Ще одна затримка з рандомізацією
+                let extra_delay = 3 + ((std::process::id() % 3) as u64);
+                eprintln!("⏳ Додаткова затримка {} секунди...", extra_delay);
+                std::thread::sleep(std::time::Duration::from_secs(extra_delay));
             }
 
             // КРОК 2: Основний запит з усіма заголовками
