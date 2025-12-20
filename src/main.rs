@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::env;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::info;
+use tracing::{info, error};
 use dtek_parse::DTEKParser;
 use chrono::{DateTime, Utc, Duration};
 
@@ -47,93 +47,116 @@ type Context<'a> = poise::Context<'a, Data, Error>;
 
 // ============= ФУНКЦІЇ КЕШУВАННЯ =============
 
+/// Оновлення кешу для ВСІХ груп одним запитом (ЕФЕКТИВНО!)
+/// Використовує get_all_schedules() - 1 HTTP запит замість N запитів
+async fn refresh_all_schedules_cache(
+    cache: &ScheduleCache,
+) -> Result<(), Error> {
+    info!("🔄 Оновлення кешу для ВСІХ груп одним запитом...");
+
+    // Робимо ОДИН HTTP запит для ВСІХ груп
+    let all_schedules = tokio::task::spawn_blocking(|| {
+        let mut parser = DTEKParser::new()?;
+        parser.get_all_schedules()
+    }).await??;
+
+    info!("✅ Отримано {} груп з DTEK", all_schedules.len());
+
+    // Зберігаємо всі групи в кеш
+    {
+        let mut write_cache = cache.write().await;
+        let now = Utc::now();
+
+        for (group, schedule_data) in all_schedules {
+            write_cache.insert(
+                group.clone(),
+                CachedSchedule::new(schedule_data)
+            );
+        }
+
+        info!("💾 Кеш оновлено для всіх груп в {}", now.format("%H:%M:%S"));
+    }
+
+    Ok(())
+}
+
+/// Перевіряє чи потрібно оновити кеш (порожній або застарілий)
+async fn should_refresh_cache(
+    cache: &ScheduleCache,
+    cache_duration: i64,
+) -> bool {
+    let read_cache = cache.read().await;
+
+    // Якщо кеш порожній - треба оновити
+    if read_cache.is_empty() {
+        return true;
+    }
+
+    // Перевіряємо чи хоч одна група застаріла
+    // Якщо хоч одна застаріла - оновлюємо ВСІ (це ефективніше)
+    for cached in read_cache.values() {
+        if cached.is_expired(cache_duration) {
+            return true;
+        }
+    }
+
+    false
+}
+
 async fn get_cached_or_fetch_schedule(
     cache: &ScheduleCache,
     cache_duration: i64,
     group: String,
 ) -> Result<dtek_parse::ScheduleData, Error> {
-    // Перевіряємо кеш
-    {
-        let read_cache = cache.read().await;
-        if let Some(cached) = read_cache.get(&group) {
-            if !cached.is_expired(cache_duration) {
-                info!("✅ Кеш HIT для групи: {} (кешовано {} хв тому)",
-                    group,
-                    (Utc::now() - cached.cached_at).num_minutes()
-                );
-                return Ok(cached.data.clone());
-            } else {
-                info!("⏰ Кеш EXPIRED для групи: {}", group);
-            }
-        } else {
-            info!("❌ Кеш MISS для групи: {}", group);
+    // Перевіряємо чи потрібно оновити ВСІ групи
+    if should_refresh_cache(cache, cache_duration).await {
+        info!("🔄 Кеш порожній або застарілий - оновлюємо ВСІ групи!");
+
+        // Оновлюємо ВСІ групи одним запитом!
+        if let Err(e) = refresh_all_schedules_cache(cache).await {
+            error!("❌ Помилка оновлення кешу: {}", e);
+            return Err(e);
         }
     }
 
-    // Якщо кешу немає або він застарів - робимо запит
-    info!("🌐 Запит до DTEK для групи: {}", group);
-    let schedule_data = tokio::task::spawn_blocking(move || {
-        let mut parser = DTEKParser::new()?;
-        parser.get_group_schedule(&group)
-    }).await??;
-
-    // Зберігаємо в кеш
+    // Тепер витягуємо потрібну групу з кешу
     {
-        let mut write_cache = cache.write().await;
-        write_cache.insert(
-            schedule_data.group.clone(),
-            CachedSchedule::new(schedule_data.clone())
-        );
-        info!("💾 Кеш SAVED для групи: {}", schedule_data.group);
+        let read_cache = cache.read().await;
+        if let Some(cached) = read_cache.get(&group) {
+            info!("✅ Кеш HIT для групи: {} (кешовано {} хв тому)",
+                group,
+                (Utc::now() - cached.cached_at).num_minutes()
+            );
+            return Ok(cached.data.clone());
+        }
     }
 
-    Ok(schedule_data)
+    // Якщо групи немає в кеші (не повинно статися)
+    error!("⚠️ Група {} не знайдена в кеші після оновлення!", group);
+    Err("Група не знайдена в кеші".into())
 }
 
 async fn get_cached_groups_list(
     cache: &ScheduleCache,
     cache_duration: i64,
 ) -> Result<Vec<String>, Error> {
-    let cache_key = "__GROUPS_LIST__".to_string();
+    // Перевіряємо чи потрібно оновити кеш (оновить ВСІ групи)
+    if should_refresh_cache(cache, cache_duration).await {
+        info!("🔄 Оновлюємо кеш для отримання списку груп");
+        refresh_all_schedules_cache(cache).await?;
+    }
 
-    // Перевіряємо кеш
+    // Витягуємо список груп з кешу
     {
         let read_cache = cache.read().await;
-        if let Some(cached) = read_cache.get(&cache_key) {
-            if !cached.is_expired(cache_duration) {
-                info!("✅ Кеш HIT для списку груп");
-                // Витягуємо список з description поля (хак для зберігання)
-                if let Some(groups_str) = &cached.data.address {
-                    let groups: Vec<String> = groups_str.split(',').map(|s| s.to_string()).collect();
-                    return Ok(groups);
-                }
-            }
-        }
+        let mut groups: Vec<String> = read_cache.keys()
+            .cloned()
+            .collect();
+        groups.sort(); // Сортуємо для кращого вигляду
+
+        info!("✅ Повернуто {} груп з кешу", groups.len());
+        return Ok(groups);
     }
-
-    // Робимо запит
-    info!("🌐 Запит до DTEK для списку груп");
-    let groups = tokio::task::spawn_blocking(|| {
-        let mut parser = DTEKParser::new()?;
-        parser.list_groups()
-    }).await??;
-
-    // Зберігаємо в кеш (використовуємо хак зі ScheduleData)
-    {
-        let mut write_cache = cache.write().await;
-        let groups_str = groups.join(",");
-        let fake_data = dtek_parse::ScheduleData {
-            address: Some(groups_str),
-            group: cache_key.clone(),
-            group_name: "groups_list".to_string(),
-            update_time: Utc::now().to_rfc3339(),
-            schedules: HashMap::new(),
-        };
-        write_cache.insert(cache_key, CachedSchedule::new(fake_data));
-        info!("💾 Кеш SAVED для списку груп");
-    }
-
-    Ok(groups)
 }
 
 // ============= КОМАНДИ =============
