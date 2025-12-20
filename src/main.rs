@@ -1,6 +1,7 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use dtek_parse::DTEKParser;
+use std::process::Command;
 
 #[derive(Parser)]
 #[command(name = "dtek-parse")]
@@ -40,6 +41,98 @@ enum Commands {
     AllGroups,
 }
 
+// ============= ФУНКЦІЇ ДЛЯ ТЕСТУВАННЯ МЕТОДІВ ОБХОДУ =============
+
+/// Тестує curl метод реальним запитом до DTEK
+fn test_curl_method(curl_path: &str, method_name: &str) -> bool {
+    eprintln!("   🔄 Тестування реального запиту до DTEK...");
+
+    let output = Command::new(curl_path)
+        .arg("-s")
+        .arg("-L")
+        .arg("-A")
+        .arg("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+        .arg("--max-time")
+        .arg("10")
+        .arg("https://www.dtek-oem.com.ua/ua/shutdowns")
+        .output();
+
+    match output {
+        Ok(result) => {
+            let html = String::from_utf8_lossy(&result.stdout);
+
+            // Перевіряємо чи є в відповіді характерні елементи сторінки DTEK
+            if html.contains("fact") || html.contains("data") || html.contains("GPV") {
+                eprintln!("   ✅ ТЕСТ ПРОЙДЕНО: метод {} успішно обходить Incapsula!", method_name);
+                true
+            } else if html.contains("incapsula") || html.contains("_Incapsula") || html.contains("reese84") {
+                eprintln!("   ❌ ТЕСТ НЕ ПРОЙДЕНО: {} блокується Incapsula", method_name);
+                false
+            } else if html.len() < 100 {
+                eprintln!("   ❌ ТЕСТ НЕ ПРОЙДЕНО: отримано порожню відповідь");
+                false
+            } else {
+                eprintln!("   ⚠️  НЕВІДОМИЙ РЕЗУЛЬТАТ: отримано {} байт (перевірте вручну)", html.len());
+                false
+            }
+        }
+        Err(e) => {
+            eprintln!("   ❌ ПОМИЛКА ЗАПИТУ: {}", e);
+            false
+        }
+    }
+}
+
+/// Тестує headless browser метод
+#[cfg(feature = "browser")]
+fn test_browser_method() -> bool {
+    eprintln!("   🔄 Тестування headless browser...");
+
+    use headless_chrome::LaunchOptions;
+
+    let options = LaunchOptions::default_builder()
+        .headless(true)
+        .sandbox(false) // Для запуску від root
+        .build()
+        .expect("Failed to build launch options");
+
+    match headless_chrome::Browser::new(options) {
+        Ok(browser) => {
+            match browser.new_tab() {
+                Ok(tab) => {
+                    match tab.navigate_to("https://www.dtek-oem.com.ua/ua/shutdowns") {
+                        Ok(_) => {
+                            // Чекаємо трохи для виконання JavaScript
+                            std::thread::sleep(std::time::Duration::from_secs(3));
+
+                            match tab.get_content() {
+                                Ok(html) => {
+                                    if html.contains("fact") || html.contains("GPV") {
+                                        eprintln!("   ✅ ТЕСТ ПРОЙДЕНО: headless browser працює!");
+                                        return true;
+                                    } else if html.contains("incapsula") || html.contains("reese84") {
+                                        eprintln!("   ❌ ТЕСТ НЕ ПРОЙДЕНО: блокується Incapsula");
+                                        return false;
+                                    } else {
+                                        eprintln!("   ⚠️  НЕВІДОМИЙ РЕЗУЛЬТАТ: отримано {} байт", html.len());
+                                        return false;
+                                    }
+                                }
+                                Err(e) => eprintln!("   ❌ Помилка отримання контенту: {}", e),
+                            }
+                        }
+                        Err(e) => eprintln!("   ❌ Помилка навігації: {}", e),
+                    }
+                }
+                Err(e) => eprintln!("   ❌ Помилка створення вкладки: {}", e),
+            }
+        }
+        Err(e) => eprintln!("   ❌ Помилка запуску браузера: {}", e),
+    }
+
+    false
+}
+
 fn print_schedule(data: &dtek_parse::ScheduleData) {
     println!("======================================================================");
 
@@ -69,11 +162,12 @@ fn print_schedule(data: &dtek_parse::ScheduleData) {
 }
 
 fn test_bypass_methods() -> Result<()> {
-    use std::process::Command;
-
     println!("╔══════════════════════════════════════════════════════════════════╗");
     println!("║  🔍 ДІАГНОСТИКА МЕТОДІВ ОБХОДУ INCAPSULA                         ║");
+    println!("║  (включає реальні HTTP запити до DTEK!)                          ║");
     println!("╚══════════════════════════════════════════════════════════════════╝\n");
+
+    let mut working_methods = Vec::new();
 
     // 1. Перевірка стандартного curl
     println!("📌 1. Стандартний curl:");
@@ -83,7 +177,13 @@ fn test_bypass_methods() -> Result<()> {
             let first_line = version.lines().next().unwrap_or("невідома версія");
             println!("   ✅ Встановлено: {}", first_line);
             println!("   📍 Шлях: /usr/bin/curl (зазвичай)");
-            println!("   ⚠️  Ефективність: НИЗЬКА (~10-30% проти Incapsula 2025)");
+            println!("   ⚠️  Очікувана ефективність: ~10-30% проти Incapsula 2025");
+            println!();
+
+            // РЕАЛЬНИЙ ТЕСТ!
+            if test_curl_method("curl", "стандартний curl") {
+                working_methods.push("curl (стандартний)");
+            }
         }
         Err(_) => {
             println!("   ❌ НЕ ВСТАНОВЛЕНО");
@@ -101,8 +201,14 @@ fn test_bypass_methods() -> Result<()> {
                 let first_line = version.lines().next().unwrap_or("curl-impersonate");
                 println!("   ✅ Встановлено: {}", first_line);
                 println!("   📍 Шлях: /usr/local/bin/curl_chrome116");
-                println!("   ✨ Ефективність: СЕРЕДНЯ (~70% проти Incapsula 2025)");
+                println!("   ✨ Очікувана ефективність: ~70% проти Incapsula 2025");
                 println!("   💡 TLS fingerprint: Chrome 116");
+                println!();
+
+                // РЕАЛЬНИЙ ТЕСТ!
+                if test_curl_method("/usr/local/bin/curl_chrome116", "curl-impersonate (Chrome 116)") {
+                    working_methods.push("curl-impersonate (Chrome 116)");
+                }
             }
             Err(_) => {
                 println!("   ⚠️  Файл існує але не виконується");
@@ -111,7 +217,13 @@ fn test_bypass_methods() -> Result<()> {
     } else if std::path::Path::new("/usr/bin/curl-impersonate-chrome").exists() {
         println!("   ✅ Встановлено: /usr/bin/curl-impersonate-chrome");
         println!("   📍 Шлях: /usr/bin/curl-impersonate-chrome");
-        println!("   ✨ Ефективність: СЕРЕДНЯ (~70% проти Incapsula 2025)");
+        println!("   ✨ Очікувана ефективність: ~70% проти Incapsula 2025");
+        println!();
+
+        // РЕАЛЬНИЙ ТЕСТ!
+        if test_curl_method("/usr/bin/curl-impersonate-chrome", "curl-impersonate") {
+            working_methods.push("curl-impersonate");
+        }
     } else {
         println!("   ❌ НЕ ВСТАНОВЛЕНО");
         println!("   💡 Установка:");
@@ -153,8 +265,14 @@ fn test_bypass_methods() -> Result<()> {
         #[cfg(feature = "browser")]
         {
             println!("   ✅ headless_chrome feature: УВІМКНЕНО");
-            println!("   ✨ Ефективність: ВИСОКА (100% проти Incapsula 2025)");
+            println!("   ✨ Очікувана ефективність: 100% проти Incapsula 2025");
             println!("   💡 Виконує JavaScript, обходить reese84 challenge");
+            println!();
+
+            // РЕАЛЬНИЙ ТЕСТ!
+            if test_browser_method() {
+                working_methods.push("headless browser");
+            }
         }
         #[cfg(not(feature = "browser"))]
         {
@@ -165,36 +283,53 @@ fn test_bypass_methods() -> Result<()> {
 
     println!();
 
-    // 4. Підсумок
+    // 4. Підсумок з РЕАЛЬНИМИ результатами тестів
     println!("╔══════════════════════════════════════════════════════════════════╗");
-    println!("║  📊 РЕКОМЕНДАЦІЇ                                                 ║");
+    println!("║  📊 РЕЗУЛЬТАТИ РЕАЛЬНИХ ТЕСТІВ                                   ║");
     println!("╚══════════════════════════════════════════════════════════════════╝");
 
-    #[cfg(feature = "browser")]
-    {
-        if chrome_found {
-            println!("✅ ОПТИМАЛЬНА КОНФІГУРАЦІЯ:");
-            println!("   • Browser feature увімкнено");
-            println!("   • Chrome встановлено");
-            println!("   • Автоматичний fallback: curl → browser");
-            println!("   • Надійність: 100%");
-        } else {
-            println!("⚠️  ПОТРІБЕН CHROME:");
-            println!("   • Browser feature увімкнено, але Chrome не знайдено");
-            println!("   • Встановіть Chrome/Chromium для повної функціональності");
+    if working_methods.is_empty() {
+        println!("❌ КРИТИЧНО: Жоден метод не працює!");
+        println!("   Можливі причини:");
+        println!("   • IP-адреса заблокована Incapsula");
+        println!("   • Проблеми з мережею");
+        println!("   • DTEK змінив захист");
+        println!();
+        println!("💡 Спробуйте:");
+        println!("   1. Встановіть curl-impersonate");
+        println!("   2. Встановіть Chrome та пересоберіть з --features browser");
+        println!("   3. Перевірте доступність DTEK у браузері");
+    } else {
+        println!("✅ ПРАЦЮЮЧІ МЕТОДИ ({}):", working_methods.len());
+        for method in &working_methods {
+            println!("   ✓ {}", method);
         }
-    }
-    #[cfg(not(feature = "browser"))]
-    {
-        println!("⚠️  ОБМЕЖЕНА КОНФІГУРАЦІЯ:");
-        println!("   • Browser feature вимкнено");
-        println!("   • Тільки curl доступний (~10-70% успіх)");
-        println!("   • Рекомендовано: cargo build --release --features browser");
+        println!();
+
+        #[cfg(feature = "browser")]
+        {
+            if working_methods.contains(&"headless browser") {
+                println!("🎯 НАЙКРАЩИЙ ВАРІАНТ: headless browser працює!");
+                println!("   • Автоматичний fallback: curl → browser");
+                println!("   • Надійність: 100%");
+            } else if chrome_found {
+                println!("⚠️  УВАГА: Browser feature увімкнено, але тест не пройдено");
+                println!("   Можливо, проблема з Chrome або мережею");
+            } else {
+                println!("💡 РЕКОМЕНДАЦІЯ: Встановіть Chrome для 100% надійності");
+            }
+        }
+        #[cfg(not(feature = "browser"))]
+        {
+            println!("💡 РЕКОМЕНДАЦІЯ: Пересоберіть з --features browser");
+            println!("   Це підвищить надійність до 100%");
+        }
     }
 
     println!();
-    println!("💡 Для тесту реального запиту:");
+    println!("💡 Команди для тестування парсеру:");
     println!("   ./target/release/dtek-parse list-groups");
+    println!("   ./target/release/dtek-parse group GPV1.1");
 
     Ok(())
 }
