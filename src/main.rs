@@ -35,6 +35,9 @@ enum Commands {
 
     /// Test available bypass methods (diagnostics)
     TestBypass,
+
+    /// Get schedules for ALL groups at once (efficient!)
+    AllGroups,
 }
 
 fn print_schedule(data: &dtek_parse::ScheduleData) {
@@ -229,6 +232,40 @@ fn main() -> Result<()> {
 
         Commands::TestBypass => {
             test_bypass_methods()?;
+        }
+
+        Commands::AllGroups => {
+            let mut parser = DTEKParser::new()?;
+            println!("🔍 Отримання графіків для ВСІХ груп одним запитом...\n");
+
+            let all_schedules = parser.get_all_schedules()?;
+
+            println!("\n╔══════════════════════════════════════════════════════════════════╗");
+            println!("║  📊 ОТРИМАНО ГРАФІКИ ДЛЯ {} ГРУП                              ║", all_schedules.len());
+            println!("╚══════════════════════════════════════════════════════════════════╝\n");
+
+            // Sort groups for consistent display
+            let mut groups: Vec<_> = all_schedules.keys().collect();
+            groups.sort();
+
+            println!("📋 Список груп з даними:");
+            for (i, group) in groups.iter().enumerate() {
+                if let Some(data) = all_schedules.get(*group) {
+                    let days_count = data.schedules.len();
+                    println!("  {:2}. {} ({} днів, оновлено: {})",
+                        i + 1, group, days_count, data.update_time);
+                }
+            }
+
+            println!("\n💡 Переваги get_all_schedules():");
+            println!("   • 1 HTTP запит замість {} запитів", all_schedules.len());
+            println!("   • ~{}-{} секунд замість ~{}-{} секунд",
+                1, 7,  // one request
+                all_schedules.len() * 1, all_schedules.len() * 7); // N requests
+            println!("   • Ідеально для ботів з кешуванням");
+            println!("\n📝 Приклад використання в коді:");
+            println!("   let all = parser.get_all_schedules()?;");
+            println!("   let gpv32 = &all[\"GPV3.2\"];  // Миттєвий доступ!");
         }
     }
 

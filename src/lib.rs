@@ -454,6 +454,73 @@ impl DTEKParser {
         })
     }
 
+    /// Get schedules for ALL groups at once (efficient - single HTTP request!)
+    /// Returns HashMap where key is group name (e.g. "GPV3.2") and value is ScheduleData
+    ///
+    /// This is MUCH more efficient than calling get_group_schedule() multiple times:
+    /// - 1 HTTP request instead of N requests
+    /// - 1 HTML parse instead of N parses
+    /// - Perfect for bots that need to cache all groups
+    pub fn get_all_schedules(&mut self) -> Result<HashMap<String, ScheduleData>> {
+        eprintln!("🔄 Отримання графіків для ВСІХ груп одним запитом...");
+
+        let html = self.fetch_page()?;
+        self.extract_javascript_data(&html)?;
+
+        let data = self.fact_data.get("data")
+            .and_then(|d| d.as_object())
+            .ok_or_else(|| anyhow!("No data field in fact"))?;
+
+        let update_time = self.fact_data.get("update")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Невідомо")
+            .to_string();
+
+        // Collect all unique groups
+        let mut all_groups = std::collections::HashSet::new();
+        for day_data in data.values() {
+            if let Some(obj) = day_data.as_object() {
+                for group in obj.keys() {
+                    all_groups.insert(group.clone());
+                }
+            }
+        }
+
+        eprintln!("✅ Знайдено {} груп, обробляю...", all_groups.len());
+
+        // Build schedules for each group
+        let mut result = HashMap::new();
+
+        for group in all_groups {
+            let mut schedules = HashMap::new();
+
+            for (timestamp_str, day_data) in data {
+                if let Some(group_data) = day_data.get(&group) {
+                    let timestamp: i64 = timestamp_str.parse()
+                        .context("Failed to parse timestamp")?;
+
+                    let datetime = Utc.timestamp_opt(timestamp + KYIV_OFFSET, 0)
+                        .single()
+                        .ok_or_else(|| anyhow!("Invalid timestamp"))?;
+
+                    let date_str = datetime.format("%Y-%m-%d (%A)").to_string();
+                    schedules.insert(date_str, self.format_schedule(group_data));
+                }
+            }
+
+            result.insert(group.clone(), ScheduleData {
+                address: None,
+                group: group.clone(),
+                group_name: group.clone(),
+                update_time: update_time.clone(),
+                schedules,
+            });
+        }
+
+        eprintln!("✅ Успішно оброблено {} груп!", result.len());
+        Ok(result)
+    }
+
     /// Get house numbers for a street via AJAX
     fn get_house_numbers(&mut self, city: &str, street: &str) -> Result<serde_json::Value> {
         let ajax_url = self.ajax_url.as_ref()
