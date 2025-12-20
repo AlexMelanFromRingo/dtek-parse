@@ -81,16 +81,24 @@ impl DTEKParser {
         const MIN_VALID_SIZE: usize = 10_000;
         const MAX_RETRIES: usize = 15;
 
-        // Спробуємо знайти curl-impersonate, якщо немає - використаємо звичайний curl
-        let curl_cmd = if std::path::Path::new("/usr/local/bin/curl_chrome116").exists() {
-            "/usr/local/bin/curl_chrome116"
+        // Визначаємо яку версію curl використовувати
+        let (curl_cmd, curl_type) = if std::path::Path::new("/usr/local/bin/curl_chrome116").exists() {
+            ("/usr/local/bin/curl_chrome116", "curl-impersonate (Chrome 116)")
+        } else if std::path::Path::new("/usr/bin/curl-impersonate-chrome").exists() {
+            ("/usr/bin/curl-impersonate-chrome", "curl-impersonate (Chrome)")
         } else {
-            "curl"
+            ("curl", "curl (standard)")
         };
 
-        if curl_cmd.contains("chrome116") {
-            eprintln!("🔧 Використовую curl-impersonate (Chrome 116) для кращого обходу Incapsula");
-        }
+        eprintln!("════════════════════════════════════════════════════════");
+        eprintln!("🔧 МЕТОД ОБХОДУ: {}", curl_type);
+        eprintln!("📍 Шлях: {}", curl_cmd);
+        #[cfg(feature = "browser")]
+        eprintln!("🌐 Headless Browser: ДОСТУПНИЙ (fallback якщо curl не спрацює)");
+        #[cfg(not(feature = "browser"))]
+        eprintln!("🌐 Headless Browser: НЕДОСТУПНИЙ (скомпільовано без feature browser)");
+        eprintln!("════════════════════════════════════════════════════════");
+
 
         // Create temporary cookie file
         let cookie_file = std::env::temp_dir().join(format!("dtek_cookies_{}.txt", std::process::id()));

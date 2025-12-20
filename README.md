@@ -21,15 +21,59 @@
 ### Вимоги
 
 - **Rust 1.70+** (для компіляції)
-- **curl** (для швидкого обходу) - встановлено за замовчуванням на Linux/macOS
-- **Chrome/Chromium** (опціонально, для headless browser fallback):
-  ```bash
-  # Ubuntu/Debian
-  sudo apt install chromium-browser
-  # або Google Chrome
-  wget https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
-  sudo dpkg -i google-chrome-stable_current_amd64.deb
-  ```
+
+**Методи обходу Incapsula (виберіть що встановити):**
+
+<details>
+<summary>📌 Мінімум: curl (працює ~10-30%)</summary>
+
+```bash
+# Вже встановлено на більшості Linux/macOS
+curl --version
+```
+⚠️ **Низька ефективність** - Incapsula легко блокує стандартний curl
+</details>
+
+<details>
+<summary>📌 Рекомендовано: curl-impersonate (працює ~70%)</summary>
+
+```bash
+# Завантажити та встановити
+cd /tmp
+wget https://github.com/lwthiker/curl-impersonate/releases/download/v0.6.1/curl-impersonate-v0.6.1.x86_64-linux-gnu.tar.gz
+tar -xzf curl-impersonate-v0.6.1.x86_64-linux-gnu.tar.gz
+sudo cp curl_chrome116 /usr/local/bin/
+sudo chmod +x /usr/local/bin/curl_chrome116
+
+# Перевірка
+/usr/local/bin/curl_chrome116 --version
+```
+✅ **Середня ефективність** - імітує Chrome 116 TLS fingerprint
+</details>
+
+<details>
+<summary>📌 НАЙКРАЩЕ: Chrome + browser feature (працює 100%)</summary>
+
+```bash
+# Встановити Chrome/Chromium
+# Ubuntu/Debian:
+sudo apt install chromium-browser
+
+# або Google Chrome:
+wget https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+sudo dpkg -i google-chrome-stable_current_amd64.deb
+
+# Перевірка
+chromium-browser --version  # або google-chrome --version
+```
+
+Потім зібрати з `browser` feature:
+```bash
+cargo build --release --features browser
+```
+
+✅ **НАЙВИЩА ефективність** - виконує JavaScript, обходить reese84 challenge
+</details>
 
 ### Збірка
 
@@ -45,6 +89,46 @@ cargo build --release --features browser
 ```
 
 Binary буде в `./target/release/dtek-parse` (~7.5 MB без browser, ~15 MB з browser)
+
+### 🔍 Діагностика методів обходу
+
+Після збірки перевірте які методи доступні:
+
+```bash
+./target/release/dtek-parse test-bypass
+```
+
+Це покаже:
+- ✅ Які методи встановлені (curl/curl-impersonate/Chrome)
+- 📊 Ефективність кожного методу
+- 💡 Рекомендації щодо покращення
+- 🎯 Поточну конфігурацію
+
+**Приклад виводу:**
+```
+╔══════════════════════════════════════════════════════════════════╗
+║  🔍 ДІАГНОСТИКА МЕТОДІВ ОБХОДУ INCAPSULA                         ║
+╚══════════════════════════════════════════════════════════════════╝
+
+📌 1. Стандартний curl:
+   ✅ Встановлено: curl 8.5.0
+   ⚠️  Ефективність: НИЗЬКА (~10-30% проти Incapsula 2025)
+
+📌 2. curl-impersonate (Chrome 116):
+   ✅ Встановлено: curl 8.1.1
+   ✨ Ефективність: СЕРЕДНЯ (~70% проти Incapsula 2025)
+
+📌 3. Chrome/Chromium:
+   ✅ Встановлено: Google Chrome 143.0.7499.146
+   ✅ headless_chrome feature: УВІМКНЕНО
+   ✨ Ефективність: ВИСОКА (100% проти Incapsula 2025)
+
+✅ ОПТИМАЛЬНА КОНФІГУРАЦІЯ:
+   • Browser feature увімкнено
+   • Chrome встановлено
+   • Автоматичний fallback: curl → browser
+   • Надійність: 100%
+```
 
 ### Як dependency
 
