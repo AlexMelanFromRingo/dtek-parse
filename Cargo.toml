@@ -1,0 +1,67 @@
+[package]
+name = "dtek_parse"
+version = "0.1.0"
+edition = "2024"
+authors = ["DTEK Parser Contributors"]
+description = "DTEK power outage schedule parser library with Telegram and Discord bots"
+license = "MIT"
+repository = "https://github.com/AlexMelanFromRingo/dtek-parse"
+
+[lib]
+name = "dtek_parse"
+path = "src/lib.rs"
+
+[[bin]]
+name = "dtek-cli"
+path = "src/main.rs"
+
+[[bin]]
+name = "dtek-telegram-bot"
+path = "src/telegram_bot.rs"
+
+[[bin]]
+name = "dtek-discord-bot"
+path = "src/bin/discord_bot.rs"
+
+[dependencies]
+# Core
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+regex = "1.11"
+chrono = { version = "0.4", features = ["serde"] }
+anyhow = "1.0"
+thiserror = "2.0"
+
+# HTTP
+reqwest = { version = "0.12", features = ["blocking", "cookies", "json", "native-tls-vendored"] }
+
+# CLI
+clap = { version = "4.5", features = ["derive"] }
+
+# Headless browser (optional)
+headless_chrome = { version = "1.0", optional = true }
+
+# Telegram bot
+teloxide = { version = "0.13", features = ["macros"] }
+tokio = { version = "1", features = ["full"] }
+
+# Discord bot
+poise = "0.6"
+
+# Database
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Utils
+dotenvy = "0.15"
+
+[features]
+default = ["curl"]
+curl = []
+browser = ["headless_chrome"]
+
+[dev-dependencies]
+tokio-test = "0.4"
