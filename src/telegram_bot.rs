@@ -14,7 +14,7 @@
 //! - CACHE_DURATION_MINUTES: Cache duration (default: 30)
 
 use chrono::{DateTime, Duration, Utc};
-use dtek_parse::{DTEKParser, ScheduleData, GROUPS};
+use dtek_parse::{DTEKParser, ScheduleData};
 use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
 use sqlx::Row;
 use std::collections::HashMap;
@@ -254,41 +254,66 @@ impl BotState {
         let chat_ids: Vec<i64> = rows.iter().map(|r| r.get("chat_id")).collect();
         Ok(chat_ids)
     }
+
+    /// Get list of available groups from cache (sorted)
+    async fn get_groups(&self) -> Vec<String> {
+        let cache = self.cache.read().await;
+        if let Some(cached) = cache.as_ref() {
+            let mut groups: Vec<String> = cached.data.keys().cloned().collect();
+            groups.sort();
+            groups
+        } else {
+            // Fallback to empty - will be populated after first fetch
+            Vec::new()
+        }
+    }
+
+    /// Check if cache is populated
+    async fn has_cache(&self) -> bool {
+        self.cache.read().await.is_some()
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
 // KEYBOARD BUILDERS
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Build keyboard with all groups
-fn groups_keyboard() -> InlineKeyboardMarkup {
+/// Build keyboard with all groups (dynamic from server)
+fn groups_keyboard(groups: &[String]) -> InlineKeyboardMarkup {
     let mut rows: Vec<Vec<InlineKeyboardButton>> = Vec::new();
 
-    // 3 buttons per row
-    for chunk in GROUPS.chunks(3) {
+    // 4 buttons per row (1.1, 1.2, 2.1, 2.2 on first row)
+    for chunk in groups.chunks(4) {
         let row: Vec<InlineKeyboardButton> = chunk
             .iter()
-            .map(|g| InlineKeyboardButton::callback(g.to_string(), format!("group:{}", g)))
+            .map(|g| InlineKeyboardButton::callback(g.clone(), format!("group:{}", g)))
             .collect();
         rows.push(row);
     }
 
+    // Navigation row
+    rows.push(vec![
+        InlineKeyboardButton::callback("🔄 Оновити", "refresh"),
+        InlineKeyboardButton::callback("📬 Підписки", "go_subscribe"),
+    ]);
+
     InlineKeyboardMarkup::new(rows)
 }
 
-/// Build subscription keyboard
-fn subscription_keyboard(subscribed: &[String]) -> InlineKeyboardMarkup {
+/// Build subscription keyboard (dynamic from server)
+fn subscription_keyboard(groups: &[String], subscribed: &[String]) -> InlineKeyboardMarkup {
     let mut rows: Vec<Vec<InlineKeyboardButton>> = Vec::new();
 
-    for chunk in GROUPS.chunks(3) {
+    // 4 buttons per row
+    for chunk in groups.chunks(4) {
         let row: Vec<InlineKeyboardButton> = chunk
             .iter()
             .map(|g| {
-                let is_sub = subscribed.contains(&g.to_string());
+                let is_sub = subscribed.contains(g);
                 let label = if is_sub {
                     format!("✅ {}", g)
                 } else {
-                    g.to_string()
+                    g.clone()
                 };
                 let action = if is_sub { "unsub" } else { "sub" };
                 InlineKeyboardButton::callback(label, format!("{}:{}", action, g))
@@ -297,11 +322,11 @@ fn subscription_keyboard(subscribed: &[String]) -> InlineKeyboardMarkup {
         rows.push(row);
     }
 
-    // Done button
-    rows.push(vec![InlineKeyboardButton::callback(
-        "✅ Готово",
-        "done".to_string(),
-    )]);
+    // Navigation row
+    rows.push(vec![
+        InlineKeyboardButton::callback("◀️ Групи", "back_groups"),
+        InlineKeyboardButton::callback("✅ Готово", "done"),
+    ]);
 
     InlineKeyboardMarkup::new(rows)
 }
@@ -322,12 +347,8 @@ async fn cmd_start(bot: Bot, msg: Message) -> anyhow::Result<()> {
 /my \- мої підписки
 /status \- статус кешу та бота
 
-*Групи відключень:*
-GPV1\.1, GPV1\.2, GPV1\.3, GPV1\.4
-GPV2\.1, GPV2\.2, GPV2\.3, GPV2\.4
-GPV3\.1, GPV3\.2, GPV3\.3, GPV3\.4
-
-💡 Якщо не знаєте свою групу \- дивіться на сайті DTEK або на квитанції\.
+💡 Групи відключень завантажуються з сервера DTEK автоматично\.
+Якщо не знаєте свою групу \- дивіться на сайті DTEK або на квитанції\.
 "#;
 
     bot.send_message(msg.chat.id, text)
@@ -339,14 +360,26 @@ GPV3\.1, GPV3\.2, GPV3\.3, GPV3\.4
 
 /// /groups command - select and view group schedule
 async fn cmd_groups(bot: Bot, msg: Message, state: Arc<BotState>) -> anyhow::Result<()> {
-    // Pre-warm cache in background (non-blocking for user)
-    let state_clone = state.clone();
-    tokio::spawn(async move {
-        let _ = state_clone.get_all_schedules().await;
-    });
+    // Pre-warm cache if empty
+    if !state.has_cache().await {
+        let _ = state.get_all_schedules().await;
+    }
+
+    let groups = state.get_groups().await;
+
+    if groups.is_empty() {
+        bot.send_message(msg.chat.id, "⏳ Завантаження даних... Спробуйте ще раз через декілька секунд.")
+            .await?;
+        // Trigger fetch in background
+        let state_clone = state.clone();
+        tokio::spawn(async move {
+            let _ = state_clone.get_all_schedules().await;
+        });
+        return Ok(());
+    }
 
     bot.send_message(msg.chat.id, "🔌 Виберіть групу відключень:")
-        .reply_markup(groups_keyboard())
+        .reply_markup(groups_keyboard(&groups))
         .await?;
 
     Ok(())
@@ -356,6 +389,17 @@ async fn cmd_groups(bot: Bot, msg: Message, state: Arc<BotState>) -> anyhow::Res
 async fn cmd_subscribe(bot: Bot, msg: Message, state: Arc<BotState>) -> anyhow::Result<()> {
     let user_id = msg.from.as_ref().map(|u| u.id.0 as i64).unwrap_or(0);
     let subscribed = state.get_user_subscriptions(user_id).await?;
+    let groups = state.get_groups().await;
+
+    if groups.is_empty() {
+        bot.send_message(msg.chat.id, "⏳ Завантаження даних... Спробуйте /subscribe ще раз.")
+            .await?;
+        let state_clone = state.clone();
+        tokio::spawn(async move {
+            let _ = state_clone.get_all_schedules().await;
+        });
+        return Ok(());
+    }
 
     let text = if subscribed.is_empty() {
         "📬 У вас немає підписок.\nНатисніть на групу для підписки:".to_string()
@@ -367,7 +411,7 @@ async fn cmd_subscribe(bot: Bot, msg: Message, state: Arc<BotState>) -> anyhow::
     };
 
     bot.send_message(msg.chat.id, text)
-        .reply_markup(subscription_keyboard(&subscribed))
+        .reply_markup(subscription_keyboard(&groups, &subscribed))
         .await?;
 
     Ok(())
@@ -421,15 +465,15 @@ async fn cmd_my(bot: Bot, msg: Message, state: Arc<BotState>) -> anyhow::Result<
 async fn cmd_status(bot: Bot, msg: Message, state: Arc<BotState>) -> anyhow::Result<()> {
     let cache = state.cache.read().await;
 
-    let cache_status = if let Some(cached) = cache.as_ref() {
-        format!(
+    let (cache_status, groups_count) = if let Some(cached) = cache.as_ref() {
+        (format!(
             "✅ Завантажено\n   Груп: {}\n   Вік: {} хв\n   DTEK оновлення: {}",
             cached.data.len(),
             cached.age_minutes(),
-            cached.dtek_update_time
-        )
+            cached.dtek_update_time.replace('.', "\\.").replace('-', "\\-")
+        ), cached.data.len())
     } else {
-        "❌ Порожній".to_string()
+        ("❌ Порожній".to_string(), 0)
     };
 
     let text = format!(
@@ -438,7 +482,7 @@ async fn cmd_status(bot: Bot, msg: Message, state: Arc<BotState>) -> anyhow::Res
         *Налаштування:*\n\
         • TTL кешу: {} хв\n\
         • Груп всього: {}",
-        cache_status, state.cache_duration, GROUPS.len()
+        cache_status, state.cache_duration, groups_count
     );
 
     bot.send_message(msg.chat.id, text)
@@ -479,16 +523,26 @@ async fn callback_handler(
             match state.get_group_schedule(value).await {
                 Ok(schedule) => {
                     let text = schedule.format_telegram();
+                    let subscribed = state.get_user_subscriptions(user_id).await.unwrap_or_default();
+                    let is_sub = subscribed.contains(&value.to_string());
+
+                    let sub_btn = if is_sub {
+                        InlineKeyboardButton::callback("🔕 Відписатися", format!("unsub_back:{}", value))
+                    } else {
+                        InlineKeyboardButton::callback("🔔 Підписатися", format!("sub_back:{}", value))
+                    };
 
                     if let Some(msg) = &q.message {
                         bot.edit_message_text(msg.chat().id, msg.id(), &text)
-                            .reply_markup(InlineKeyboardMarkup::new(vec![vec![
-                                InlineKeyboardButton::callback("◀️ Назад", "back_groups"),
-                                InlineKeyboardButton::callback(
-                                    "🔔 Підписатися",
-                                    format!("sub:{}", value),
-                                ),
-                            ]]))
+                            .reply_markup(InlineKeyboardMarkup::new(vec![
+                                vec![
+                                    InlineKeyboardButton::callback("◀️ Групи", "back_groups"),
+                                    sub_btn,
+                                ],
+                                vec![
+                                    InlineKeyboardButton::callback("🔄 Оновити", format!("refresh_group:{}", value)),
+                                ],
+                            ]))
                             .await?;
                     }
                 }
@@ -505,6 +559,7 @@ async fn callback_handler(
             // Subscribe to group
             let added = state.subscribe(user_id, chat_id.0, value).await?;
             let subscribed = state.get_user_subscriptions(user_id).await?;
+            let groups = state.get_groups().await;
 
             let alert = if added {
                 format!("✅ Підписано на {}", value)
@@ -517,7 +572,7 @@ async fn callback_handler(
             // Update keyboard
             if let Some(msg) = &q.message {
                 bot.edit_message_reply_markup(msg.chat().id, msg.id())
-                    .reply_markup(subscription_keyboard(&subscribed))
+                    .reply_markup(subscription_keyboard(&groups, &subscribed))
                     .await?;
             }
         }
@@ -526,6 +581,7 @@ async fn callback_handler(
             // Unsubscribe from group
             let removed = state.unsubscribe(user_id, value).await?;
             let subscribed = state.get_user_subscriptions(user_id).await?;
+            let groups = state.get_groups().await;
 
             let alert = if removed {
                 format!("🔕 Відписано від {}", value)
@@ -538,7 +594,7 @@ async fn callback_handler(
             // Update keyboard
             if let Some(msg) = &q.message {
                 bot.edit_message_reply_markup(msg.chat().id, msg.id())
-                    .reply_markup(subscription_keyboard(&subscribed))
+                    .reply_markup(subscription_keyboard(&groups, &subscribed))
                     .await?;
             }
         }
@@ -546,29 +602,150 @@ async fn callback_handler(
         "back_groups" => {
             // Go back to groups selection
             bot.answer_callback_query(&q.id).await?;
+            let groups = state.get_groups().await;
 
             if let Some(msg) = &q.message {
                 bot.edit_message_text(msg.chat().id, msg.id(), "🔌 Виберіть групу відключень:")
-                    .reply_markup(groups_keyboard())
+                    .reply_markup(groups_keyboard(&groups))
                     .await?;
             }
         }
 
-        "done" => {
-            // Finish subscription management
+        "refresh" => {
+            // Force refresh cache and show groups
+            bot.answer_callback_query(&q.id)
+                .text("🔄 Оновлення даних...")
+                .await?;
+
+            if let Err(e) = state.refresh_cache().await {
+                error!("Failed to refresh cache: {}", e);
+                bot.answer_callback_query(&q.id)
+                    .text(format!("❌ Помилка: {}", e))
+                    .show_alert(true)
+                    .await?;
+            } else {
+                let groups = state.get_groups().await;
+                if let Some(msg) = &q.message {
+                    bot.edit_message_text(msg.chat().id, msg.id(), "🔌 Виберіть групу відключень:\n\n✅ Дані оновлено!")
+                        .reply_markup(groups_keyboard(&groups))
+                        .await?;
+                }
+            }
+        }
+
+        "go_subscribe" => {
+            // Go to subscriptions
+            bot.answer_callback_query(&q.id).await?;
             let subscribed = state.get_user_subscriptions(user_id).await?;
+            let groups = state.get_groups().await;
 
             let text = if subscribed.is_empty() {
-                "📭 У вас немає підписок.".to_string()
+                "📬 У вас немає підписок.\nНатисніть на групу для підписки:".to_string()
             } else {
-                format!("✅ Підписки збережено: {}", subscribed.join(", "))
+                format!(
+                    "📬 Ваші підписки: {}\n\nНатисніть для зміни:",
+                    subscribed.join(", ")
+                )
             };
-
-            bot.answer_callback_query(&q.id).await?;
 
             if let Some(msg) = &q.message {
                 bot.edit_message_text(msg.chat().id, msg.id(), text)
-                    .reply_markup(InlineKeyboardMarkup::default())
+                    .reply_markup(subscription_keyboard(&groups, &subscribed))
+                    .await?;
+            }
+        }
+
+        "sub_back" | "unsub_back" => {
+            // Subscribe/unsubscribe and stay on group view
+            let is_sub = action == "sub_back";
+
+            if is_sub {
+                state.subscribe(user_id, chat_id.0, value).await?;
+                bot.answer_callback_query(&q.id)
+                    .text(format!("✅ Підписано на {}", value))
+                    .await?;
+            } else {
+                state.unsubscribe(user_id, value).await?;
+                bot.answer_callback_query(&q.id)
+                    .text(format!("🔕 Відписано від {}", value))
+                    .await?;
+            }
+
+            // Refresh the group view with updated button
+            let sub_btn = if is_sub {
+                InlineKeyboardButton::callback("🔕 Відписатися", format!("unsub_back:{}", value))
+            } else {
+                InlineKeyboardButton::callback("🔔 Підписатися", format!("sub_back:{}", value))
+            };
+
+            if let Some(msg) = &q.message {
+                let _ = bot.edit_message_reply_markup(msg.chat().id, msg.id())
+                    .reply_markup(InlineKeyboardMarkup::new(vec![
+                        vec![
+                            InlineKeyboardButton::callback("◀️ Групи", "back_groups"),
+                            sub_btn,
+                        ],
+                        vec![
+                            InlineKeyboardButton::callback("🔄 Оновити", format!("refresh_group:{}", value)),
+                        ],
+                    ]))
+                    .await;
+            }
+        }
+
+        "refresh_group" => {
+            // Refresh cache and show updated group
+            bot.answer_callback_query(&q.id)
+                .text("🔄 Оновлення...")
+                .await?;
+
+            if let Err(e) = state.refresh_cache().await {
+                error!("Failed to refresh cache: {}", e);
+            }
+
+            if let Ok(schedule) = state.get_group_schedule(value).await {
+                let text = schedule.format_telegram();
+                let subscribed = state.get_user_subscriptions(user_id).await.unwrap_or_default();
+                let is_sub = subscribed.contains(&value.to_string());
+
+                let sub_btn = if is_sub {
+                    InlineKeyboardButton::callback("🔕 Відписатися", format!("unsub_back:{}", value))
+                } else {
+                    InlineKeyboardButton::callback("🔔 Підписатися", format!("sub_back:{}", value))
+                };
+
+                if let Some(msg) = &q.message {
+                    let _ = bot.edit_message_text(msg.chat().id, msg.id(), &text)
+                        .reply_markup(InlineKeyboardMarkup::new(vec![
+                            vec![
+                                InlineKeyboardButton::callback("◀️ Групи", "back_groups"),
+                                sub_btn,
+                            ],
+                            vec![
+                                InlineKeyboardButton::callback("🔄 Оновити", format!("refresh_group:{}", value)),
+                            ],
+                        ]))
+                        .await;
+                }
+            }
+        }
+
+        "done" => {
+            // Finish subscription management - return to groups menu
+            let subscribed = state.get_user_subscriptions(user_id).await?;
+            let groups = state.get_groups().await;
+
+            let alert = if subscribed.is_empty() {
+                "📭 Підписок немає".to_string()
+            } else {
+                format!("✅ Збережено: {}", subscribed.join(", "))
+            };
+
+            bot.answer_callback_query(&q.id).text(&alert).await?;
+
+            if let Some(msg) = &q.message {
+                bot.edit_message_text(msg.chat().id, msg.id(), "🔌 Виберіть групу відключень:")
+                    .reply_markup(groups_keyboard(&groups))
                     .await?;
             }
         }

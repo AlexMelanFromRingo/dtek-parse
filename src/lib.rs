@@ -154,6 +154,11 @@ impl DaySchedule {
         self.hours.iter().filter(|h| h.status.is_maybe_off()).collect()
     }
 
+    /// Get hours with power ON
+    pub fn get_on_hours(&self) -> Vec<&HourSchedule> {
+        self.hours.iter().filter(|h| h.status.is_on()).collect()
+    }
+
     /// Format schedule as compact string for TG/Discord
     pub fn format_compact(&self) -> String {
         let mut result = format!("📅 {} ({})\n", self.date, self.day_of_week);
@@ -169,6 +174,64 @@ impl DaySchedule {
         result
     }
 
+    /// Get start minute for a status (0 for full hour/first half, 30 for second half)
+    fn status_start_minute(status: &OutageStatus) -> u16 {
+        match status {
+            OutageStatus::Second | OutageStatus::Msecond => 30,
+            _ => 0,
+        }
+    }
+
+    /// Get end minute for a status (30 for first half, 60 for full hour/second half)
+    fn status_end_minute(status: &OutageStatus) -> u16 {
+        match status {
+            OutageStatus::First | OutageStatus::Mfirst => 30,
+            _ => 60,
+        }
+    }
+
+    /// Merge consecutive time ranges into spans, accounting for half-hours
+    /// e.g., "06:00-07:00, 07:00-07:30" -> "06:00-07:30"
+    fn merge_time_ranges_v2(hours: &[&HourSchedule]) -> Vec<String> {
+        if hours.is_empty() {
+            return vec![];
+        }
+
+        let mut merged = Vec::new();
+
+        // Track time in total minutes from midnight
+        let first = hours[0];
+        let mut start_mins = (first.hour as u16) * 60 + Self::status_start_minute(&first.status);
+        let mut end_mins = (first.hour as u16) * 60 + Self::status_end_minute(&first.status);
+
+        for h in hours.iter().skip(1) {
+            let h_start = (h.hour as u16) * 60 + Self::status_start_minute(&h.status);
+            let h_end = (h.hour as u16) * 60 + Self::status_end_minute(&h.status);
+
+            if h_start == end_mins {
+                // Consecutive - extend range
+                end_mins = h_end;
+            } else {
+                // Gap - save current range and start new one
+                merged.push(format!(
+                    "{:02}:{:02}-{:02}:{:02}",
+                    start_mins / 60, start_mins % 60,
+                    end_mins / 60, end_mins % 60
+                ));
+                start_mins = h_start;
+                end_mins = h_end;
+            }
+        }
+        // Push last range
+        merged.push(format!(
+            "{:02}:{:02}-{:02}:{:02}",
+            start_mins / 60, start_mins % 60,
+            end_mins / 60, end_mins % 60
+        ));
+
+        merged
+    }
+
     /// Format only outages (for notifications)
     pub fn format_outages_only(&self) -> Option<String> {
         let off_hours = self.get_off_hours();
@@ -181,20 +244,56 @@ impl DaySchedule {
         let mut result = format!("📅 {} ({}):\n", self.date, self.day_of_week);
 
         if !off_hours.is_empty() {
-            result.push_str("❌ Відключення: ");
-            let ranges: Vec<_> = off_hours.iter().map(|h| h.time_range.as_str()).collect();
+            result.push_str("  ❌ ");
+            let ranges = Self::merge_time_ranges_v2(&off_hours);
             result.push_str(&ranges.join(", "));
             result.push('\n');
         }
 
         if !maybe_hours.is_empty() {
-            result.push_str("⚠️ Можливі: ");
-            let ranges: Vec<_> = maybe_hours.iter().map(|h| h.time_range.as_str()).collect();
+            result.push_str("  ⚠️ ");
+            let ranges = Self::merge_time_ranges_v2(&maybe_hours);
             result.push_str(&ranges.join(", "));
             result.push('\n');
         }
 
         Some(result)
+    }
+
+    /// Format schedule showing both outages and light periods
+    pub fn format_schedule(&self) -> String {
+        let off_hours = self.get_off_hours();
+        let maybe_hours = self.get_maybe_hours();
+        let on_hours = self.get_on_hours();
+
+        let mut result = format!("📅 {} ({}):\n", self.date, self.day_of_week);
+
+        if !on_hours.is_empty() {
+            result.push_str("  ✅ ");
+            let ranges = Self::merge_time_ranges_v2(&on_hours);
+            result.push_str(&ranges.join(", "));
+            result.push('\n');
+        }
+
+        if !off_hours.is_empty() {
+            result.push_str("  ❌ ");
+            let ranges = Self::merge_time_ranges_v2(&off_hours);
+            result.push_str(&ranges.join(", "));
+            result.push('\n');
+        }
+
+        if !maybe_hours.is_empty() {
+            result.push_str("  ⚠️ ");
+            let ranges = Self::merge_time_ranges_v2(&maybe_hours);
+            result.push_str(&ranges.join(", "));
+            result.push('\n');
+        }
+
+        if on_hours.is_empty() && off_hours.is_empty() && maybe_hours.is_empty() {
+            result.push_str("  ❓ Немає даних\n");
+        }
+
+        result
     }
 }
 
@@ -253,18 +352,15 @@ impl ScheduleData {
     /// Format for Telegram (shorter)
     pub fn format_telegram(&self) -> String {
         let mut result = format!(
-            "🏷️ *Група: {}*\n🕐 Оновлено: {}\n\n",
+            "🏷️ Група: {}\n🕐 Оновлено: {}\n",
             self.group, self.update_time
         );
+        result.push_str("━━━━━━━━━━━━━━━━━━━━\n\n");
 
         for date in self.get_sorted_dates() {
             if let Some(day) = self.schedules.get(date) {
-                if let Some(outages) = day.format_outages_only() {
-                    result.push_str(&outages);
-                    result.push('\n');
-                } else {
-                    result.push_str(&format!("📅 {} - ✅ Без відключень\n\n", day.date));
-                }
+                result.push_str(&day.format_schedule());
+                result.push('\n');
             }
         }
 
@@ -297,11 +393,15 @@ impl ScheduleData {
     }
 }
 
-/// Available outage groups
+/// Default outage groups (6 global groups × 2 subgroups = 12)
+/// NOTE: Actual groups are parsed dynamically from server response via DTEKParser::get_all_schedules()
 pub const GROUPS: &[&str] = &[
-    "GPV1.1", "GPV1.2", "GPV1.3", "GPV1.4",
-    "GPV2.1", "GPV2.2", "GPV2.3", "GPV2.4",
-    "GPV3.1", "GPV3.2", "GPV3.3", "GPV3.4",
+    "GPV1.1", "GPV1.2",
+    "GPV2.1", "GPV2.2",
+    "GPV3.1", "GPV3.2",
+    "GPV4.1", "GPV4.2",
+    "GPV5.1", "GPV5.2",
+    "GPV6.1", "GPV6.2",
 ];
 
 /// DTEK Parser main structure
