@@ -128,13 +128,25 @@ impl ScheduleCache {
             return "Empty".to_string();
         }
 
-        let oldest = cache.values().map(|c| c.age_minutes()).max().unwrap_or(0);
-        format!(
-            "{} groups, oldest: {} min, refreshing: {}",
-            cache.len(),
-            oldest,
-            self.is_refreshing()
-        )
+        // Find oldest entry and its timestamp
+        let oldest_entry = cache.values().min_by_key(|c| c.cached_at);
+
+        if let Some(entry) = oldest_entry {
+            // Convert to Kyiv time (UTC+2)
+            let kyiv_offset = Duration::hours(2);
+            let cached_at_kyiv = entry.cached_at + kyiv_offset;
+            let cached_time = cached_at_kyiv.format("%H:%M").to_string();
+
+            format!(
+                "{} груп | Оновлено: {} | Вік: {} хв | Refresh: {}",
+                cache.len(),
+                cached_time,
+                entry.age_minutes(),
+                if self.is_refreshing() { "⏳" } else { "✅" }
+            )
+        } else {
+            format!("{} groups", cache.len())
+        }
     }
 }
 

@@ -466,11 +466,17 @@ async fn cmd_status(bot: Bot, msg: Message, state: Arc<BotState>) -> anyhow::Res
     let cache = state.cache.read().await;
 
     let (cache_status, groups_count) = if let Some(cached) = cache.as_ref() {
+        // Convert UTC to Kyiv time (UTC+2)
+        let kyiv_offset = Duration::hours(2);
+        let cached_at_kyiv = cached.cached_at + kyiv_offset;
+        let cached_time = cached_at_kyiv.format("%H:%M").to_string();
+
         (format!(
-            "✅ Завантажено\n   Груп: {}\n   Вік: {} хв\n   DTEK оновлення: {}",
+            "✅ Завантажено\n   Груп: {}\n   Оновлено о: {}\n   Вік кешу: {} хв\n   DTEK оновлення: {}",
             cached.data.len(),
+            cached_time.replace(':', "\\:"),
             cached.age_minutes(),
-            cached.dtek_update_time.replace('.', "\\.").replace('-', "\\-")
+            cached.dtek_update_time.replace('.', "\\.").replace('-', "\\-").replace(':', "\\:")
         ), cached.data.len())
     } else {
         ("❌ Порожній".to_string(), 0)

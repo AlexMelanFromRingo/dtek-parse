@@ -113,9 +113,14 @@ impl OutageStatus {
         matches!(self, Self::Maybe | Self::Mfirst | Self::Msecond)
     }
 
-    /// Check if power is ON
+    /// Check if power is ON (full hour)
     pub fn is_on(&self) -> bool {
         matches!(self, Self::Yes)
+    }
+
+    /// Check if there is ANY light during this hour (full or partial)
+    pub fn has_light(&self) -> bool {
+        matches!(self, Self::Yes | Self::First | Self::Second)
     }
 }
 
@@ -154,9 +159,9 @@ impl DaySchedule {
         self.hours.iter().filter(|h| h.status.is_maybe_off()).collect()
     }
 
-    /// Get hours with power ON
+    /// Get hours with power ON (including partial hours)
     pub fn get_on_hours(&self) -> Vec<&HourSchedule> {
-        self.hours.iter().filter(|h| h.status.is_on()).collect()
+        self.hours.iter().filter(|h| h.status.has_light()).collect()
     }
 
     /// Format schedule as compact string for TG/Discord
@@ -174,25 +179,60 @@ impl DaySchedule {
         result
     }
 
-    /// Get start minute for a status (0 for full hour/first half, 30 for second half)
-    fn status_start_minute(status: &OutageStatus) -> u16 {
+    /// Get start minute for OUTAGE (0 for full hour/first half, 30 for second half)
+    fn outage_start_minute(status: &OutageStatus) -> u16 {
         match status {
             OutageStatus::Second | OutageStatus::Msecond => 30,
             _ => 0,
         }
     }
 
-    /// Get end minute for a status (30 for first half, 60 for full hour/second half)
-    fn status_end_minute(status: &OutageStatus) -> u16 {
+    /// Get end minute for OUTAGE (30 for first half, 60 for full hour/second half)
+    fn outage_end_minute(status: &OutageStatus) -> u16 {
         match status {
             OutageStatus::First | OutageStatus::Mfirst => 30,
             _ => 60,
         }
     }
 
-    /// Merge consecutive time ranges into spans, accounting for half-hours
-    /// e.g., "06:00-07:00, 07:00-07:30" -> "06:00-07:30"
-    fn merge_time_ranges_v2(hours: &[&HourSchedule]) -> Vec<String> {
+    /// Get start minute for LIGHT (inverse of outage)
+    fn light_start_minute(status: &OutageStatus) -> u16 {
+        match status {
+            // First = outage 0-30, so light starts at 30
+            OutageStatus::First => 30,
+            // Second = outage 30-60, so light starts at 0
+            // Yes = full hour light, starts at 0
+            _ => 0,
+        }
+    }
+
+    /// Get end minute for LIGHT (inverse of outage)
+    fn light_end_minute(status: &OutageStatus) -> u16 {
+        match status {
+            // Second = outage 30-60, so light ends at 30
+            OutageStatus::Second => 30,
+            // First = outage 0-30, so light ends at 60
+            // Yes = full hour light, ends at 60
+            _ => 60,
+        }
+    }
+
+    /// Merge consecutive time ranges for OUTAGES
+    fn merge_outage_ranges(hours: &[&HourSchedule]) -> Vec<String> {
+        Self::merge_ranges_with(hours, Self::outage_start_minute, Self::outage_end_minute)
+    }
+
+    /// Merge consecutive time ranges for LIGHT (power ON)
+    fn merge_light_ranges(hours: &[&HourSchedule]) -> Vec<String> {
+        Self::merge_ranges_with(hours, Self::light_start_minute, Self::light_end_minute)
+    }
+
+    /// Generic merge function with configurable start/end minute extractors
+    fn merge_ranges_with<F, G>(hours: &[&HourSchedule], start_fn: F, end_fn: G) -> Vec<String>
+    where
+        F: Fn(&OutageStatus) -> u16,
+        G: Fn(&OutageStatus) -> u16,
+    {
         if hours.is_empty() {
             return vec![];
         }
@@ -201,12 +241,12 @@ impl DaySchedule {
 
         // Track time in total minutes from midnight
         let first = hours[0];
-        let mut start_mins = (first.hour as u16) * 60 + Self::status_start_minute(&first.status);
-        let mut end_mins = (first.hour as u16) * 60 + Self::status_end_minute(&first.status);
+        let mut start_mins = (first.hour as u16) * 60 + start_fn(&first.status);
+        let mut end_mins = (first.hour as u16) * 60 + end_fn(&first.status);
 
         for h in hours.iter().skip(1) {
-            let h_start = (h.hour as u16) * 60 + Self::status_start_minute(&h.status);
-            let h_end = (h.hour as u16) * 60 + Self::status_end_minute(&h.status);
+            let h_start = (h.hour as u16) * 60 + start_fn(&h.status);
+            let h_end = (h.hour as u16) * 60 + end_fn(&h.status);
 
             if h_start == end_mins {
                 // Consecutive - extend range
@@ -245,14 +285,14 @@ impl DaySchedule {
 
         if !off_hours.is_empty() {
             result.push_str("  ❌ ");
-            let ranges = Self::merge_time_ranges_v2(&off_hours);
+            let ranges = Self::merge_outage_ranges(&off_hours);
             result.push_str(&ranges.join(", "));
             result.push('\n');
         }
 
         if !maybe_hours.is_empty() {
             result.push_str("  ⚠️ ");
-            let ranges = Self::merge_time_ranges_v2(&maybe_hours);
+            let ranges = Self::merge_outage_ranges(&maybe_hours);
             result.push_str(&ranges.join(", "));
             result.push('\n');
         }
@@ -270,21 +310,21 @@ impl DaySchedule {
 
         if !on_hours.is_empty() {
             result.push_str("  ✅ ");
-            let ranges = Self::merge_time_ranges_v2(&on_hours);
+            let ranges = Self::merge_light_ranges(&on_hours);
             result.push_str(&ranges.join(", "));
             result.push('\n');
         }
 
         if !off_hours.is_empty() {
             result.push_str("  ❌ ");
-            let ranges = Self::merge_time_ranges_v2(&off_hours);
+            let ranges = Self::merge_outage_ranges(&off_hours);
             result.push_str(&ranges.join(", "));
             result.push('\n');
         }
 
         if !maybe_hours.is_empty() {
             result.push_str("  ⚠️ ");
-            let ranges = Self::merge_time_ranges_v2(&maybe_hours);
+            let ranges = Self::merge_outage_ranges(&maybe_hours);
             result.push_str(&ranges.join(", "));
             result.push('\n');
         }
