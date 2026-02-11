@@ -135,6 +135,19 @@ tar -xzf curl-impersonate-v0.6.1.x86_64-linux-gnu.tar.gz
 sudo cp curl_chrome116 /usr/local/bin/
 ```
 
+## Гілки / Branches
+
+| Гілка | Статус | Опис |
+|-------|--------|------|
+| `claude/complete-rewrite-tg-ds-bots` | **АКТУАЛЬНА** | TG + DS боти, CLI, бібліотека |
+| `master` | Merged | Зліто в актуальну |
+| `main` | Stale | Тільки початковий коміт |
+| `claude/rust-port-curl-only-xllUi` | Застаріла | Замінено повним переписуванням |
+| `claude/discord-bot-final-xllUi` | Застаріла | Замінено повним переписуванням |
+| `claude/main-reorganization-xllUi` | Застаріла | Стара документація |
+| `claude/discord-bot-cache-xllUi` | Застаріла | Стара версія DS бота |
+| `claude/analyze-outage-schedule-location-xllUi` | Архів | Legacy Python парсер |
+
 ## Ліцензія
 
 MIT

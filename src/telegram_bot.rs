@@ -822,14 +822,23 @@ async fn background_change_detector(bot: Bot, state: Arc<BotState>) {
                             }
                         };
 
+                        let escaped_group = group.replace('.', "\\.");
+                        let formatted = new_schedule.format_telegram()
+                            .replace('.', "\\.")
+                            .replace('-', "\\-")
+                            .replace('(', "\\(")
+                            .replace(')', "\\)")
+                            .replace('!', "\\!");
                         let text = format!(
                             "🔔 *Оновлення графіка для {}*\n\n{}",
-                            group,
-                            new_schedule.format_telegram()
+                            escaped_group, formatted
                         );
 
                         for chat_id in subscribers {
-                            if let Err(e) = bot.send_message(ChatId(chat_id), &text).await {
+                            if let Err(e) = bot.send_message(ChatId(chat_id), &text)
+                                .parse_mode(ParseMode::MarkdownV2)
+                                .await
+                            {
                                 error!("Failed to notify chat {}: {}", chat_id, e);
                             }
                         }
