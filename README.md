@@ -1,3 +1,5 @@
+> **⚠️ Ця гілка застаріла.** Актуальна гілка: `claude/complete-rewrite-tg-ds-bots`
+
 # DTEK Parse - Rust Library
 
 🔌 Rust бібліотека для отримання графіків відключень електроенергії ДТЕК.
