@@ -1,0 +1,11 @@
+[book]
+title = "dtek-parse"
+description = "DTEK power outage schedule parser — library, CLI, Telegram and Discord bots"
+authors = ["DTEK Parse Contributors"]
+language = "en"
+src = "src"
+
+[output.html]
+default-theme = "navy"
+git-repository-url = "https://github.com/AlexMelanFromRingo/dtek-parse"
+edit-url-template = "https://github.com/AlexMelanFromRingo/dtek-parse/edit/main/docs/src/{path}"
