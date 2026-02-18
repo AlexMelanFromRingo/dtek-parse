@@ -31,4 +31,5 @@ for (group, data) in &schedules {
 - **curl-impersonate** — bypasses Incapsula bot protection without a real browser.
 - **Shared DB** — optional `SCHEDULE_DB_URL` lets one `dtek-schedule-service` process serve both bots, eliminating duplicate requests.
 - **In-memory cache** — both bots cache schedules for `CACHE_DURATION_MINUTES` (default 30 min) and only hit DTEK (or the shared DB) on a miss.
+- **Persistent change detection** — the Telegram bot saves schedule snapshots to SQLite so change notifications survive restarts.
 

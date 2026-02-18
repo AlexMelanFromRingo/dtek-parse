@@ -7,7 +7,7 @@ A Telegram bot for viewing outage schedules and subscribing to change notificati
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `TELOXIDE_TOKEN` | ✅ | — | Bot token from @BotFather |
-| `DATABASE_URL` | | `sqlite:dtek_bot.db?mode=rwc` | Local SQLite for subscriptions |
+| `DATABASE_URL` | | `sqlite:dtek_bot.db?mode=rwc` | Local SQLite for subscriptions and snapshots |
 | `CACHE_DURATION_MINUTES` | | `30` | Cache TTL in minutes |
 | `SCHEDULE_DB_URL` | | *(not set)* | Shared schedule DB path |
 
@@ -25,6 +25,7 @@ A Telegram bot for viewing outage schedules and subscribing to change notificati
 ## Local database schema
 
 ```sql
+-- User subscriptions
 CREATE TABLE subscriptions (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id    INTEGER NOT NULL,
@@ -32,6 +33,13 @@ CREATE TABLE subscriptions (
     group_name TEXT NOT NULL,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(user_id, group_name)
+);
+
+-- Persistent schedule snapshot for change detection
+CREATE TABLE schedule_snapshots (
+    group_name TEXT PRIMARY KEY,
+    data       TEXT NOT NULL,    -- JSON-serialised ScheduleData
+    saved_at   INTEGER NOT NULL  -- Unix timestamp
 );
 ```
 
@@ -41,7 +49,9 @@ The bot runs two background tasks:
 
 **Cache refresh** — re-fetches schedules from DTEK (or shared DB) every `CACHE_DURATION_MINUTES` minutes, keeping the in-memory cache warm.
 
-**Change detector** — every 15 minutes, compares the current schedule with the previous snapshot. When a change is detected for a group, all subscribers of that group receive a notification message.
+**Change detector** — every 15 minutes, compares the current schedule with the previous snapshot. When a change is detected for a group, all subscribers receive a notification.
+
+The snapshot is stored in `schedule_snapshots` (SQLite), so change detection works correctly after a restart — no notifications are missed even if the bot was down when DTEK updated the schedule.
 
 ## Running
 
