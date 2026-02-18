@@ -149,6 +149,17 @@ impl BotState {
         .execute(&db)
         .await?;
 
+        // Snapshot table for persistent change detection
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS schedule_snapshots (
+                group_name TEXT PRIMARY KEY,
+                data       TEXT NOT NULL,
+                saved_at   INTEGER NOT NULL
+            )",
+        )
+        .execute(&db)
+        .await?;
+
         info!("Database initialized");
         info!("Cache duration: {} minutes", cache_duration);
 
@@ -298,6 +309,41 @@ impl BotState {
 
         let chat_ids: Vec<i64> = rows.iter().map(|r| r.get("chat_id")).collect();
         Ok(chat_ids)
+    }
+
+    /// Save current schedules as a persistent snapshot for change detection
+    async fn save_snapshot(&self, schedules: &HashMap<String, ScheduleData>) -> anyhow::Result<()> {
+        let ts = chrono::Utc::now().timestamp();
+        for (group, schedule) in schedules {
+            let json = serde_json::to_string(schedule)?;
+            sqlx::query(
+                "INSERT OR REPLACE INTO schedule_snapshots (group_name, data, saved_at) VALUES (?, ?, ?)",
+            )
+            .bind(group)
+            .bind(&json)
+            .bind(ts)
+            .execute(&self.db)
+            .await?;
+        }
+        Ok(())
+    }
+
+    /// Load the last saved snapshot from DB (empty map if none exists)
+    async fn load_snapshot(&self) -> anyhow::Result<HashMap<String, ScheduleData>> {
+        let rows = sqlx::query("SELECT group_name, data FROM schedule_snapshots")
+            .fetch_all(&self.db)
+            .await?;
+
+        let mut map = HashMap::new();
+        for row in rows {
+            let group_name: String = row.get("group_name");
+            let data: String = row.get("data");
+            match serde_json::from_str::<ScheduleData>(&data) {
+                Ok(sd) => { map.insert(group_name, sd); }
+                Err(e) => warn!("Failed to deserialize snapshot for {}: {}", group_name, e),
+            }
+        }
+        Ok(map)
     }
 
     /// Get list of available groups from cache (sorted)
@@ -834,8 +880,21 @@ async fn background_cache_refresh(state: Arc<BotState>) {
 async fn background_change_detector(bot: Bot, state: Arc<BotState>) {
     let check_interval = std::time::Duration::from_secs(15 * 60); // 15 minutes
 
-    // Store previous schedules for comparison
-    let mut previous: Option<HashMap<String, ScheduleData>> = None;
+    // Load previous snapshot from DB so change detection survives restarts
+    let mut previous: HashMap<String, ScheduleData> = match state.load_snapshot().await {
+        Ok(snap) if !snap.is_empty() => {
+            info!("Change detector: loaded snapshot ({} groups)", snap.len());
+            snap
+        }
+        Ok(_) => {
+            info!("Change detector: no snapshot yet, starting fresh");
+            HashMap::new()
+        }
+        Err(e) => {
+            error!("Change detector: failed to load snapshot: {}", e);
+            HashMap::new()
+        }
+    };
 
     loop {
         tokio::time::sleep(check_interval).await;
@@ -851,10 +910,10 @@ async fn background_change_detector(bot: Bot, state: Arc<BotState>) {
             }
         };
 
-        // Compare with previous
-        if let Some(prev) = &previous {
+        // Compare with previous snapshot
+        if !previous.is_empty() {
             for (group, new_schedule) in &current {
-                if let Some(old_schedule) = prev.get(group) {
+                if let Some(old_schedule) = previous.get(group) {
                     if new_schedule.has_changes_from(old_schedule) {
                         info!("Change detected for group: {}", group);
 
@@ -892,7 +951,12 @@ async fn background_change_detector(bot: Bot, state: Arc<BotState>) {
             }
         }
 
-        previous = Some(current);
+        // Persist snapshot to DB so next restart picks up from here
+        if let Err(e) = state.save_snapshot(&current).await {
+            error!("Change detector: failed to save snapshot: {}", e);
+        }
+
+        previous = current;
     }
 }
 
