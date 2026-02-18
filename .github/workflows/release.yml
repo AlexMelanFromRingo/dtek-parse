@@ -3,7 +3,15 @@ name: Release
 on:
   push:
     tags:
-      - 'v*'
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v0.2.3)"
+        required: true
+
+permissions:
+  contents: write
 
 env:
   CARGO_TERM_COLOR: always
@@ -13,6 +21,7 @@ jobs:
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
@@ -21,53 +30,94 @@ jobs:
             os: ubuntu-latest
           - target: x86_64-pc-windows-msvc
             os: windows-latest
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
 
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
 
       - name: Install musl tools
         if: matrix.target == 'x86_64-unknown-linux-musl'
         run: sudo apt-get update && sudo apt-get install -y musl-tools
 
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('Cargo.toml') }}
+
       - name: Build
-        run: cargo build --release --features browser --target ${{ matrix.target }}
+        run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Prepare artifacts (Unix)
+      - name: Determine tag
+        id: tag
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "name=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "name=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Package (Unix)
         if: runner.os != 'Windows'
+        shell: bash
         run: |
-          mkdir -p artifacts
-          cp target/${{ matrix.target }}/release/dtek-cli artifacts/dtek-cli-${{ matrix.target }}
-          cp target/${{ matrix.target }}/release/dtek-telegram-bot artifacts/dtek-telegram-bot-${{ matrix.target }}
-          cp target/${{ matrix.target }}/release/dtek-discord-bot artifacts/dtek-discord-bot-${{ matrix.target }}
+          TAG=${{ steps.tag.outputs.name }}
+          TARGET=${{ matrix.target }}
+          DIR="dtek-parse-${TAG}-${TARGET}"
+          mkdir "$DIR"
+          for BIN in dtek-cli dtek-telegram-bot dtek-discord-bot dtek-schedule-service; do
+            cp "target/${TARGET}/release/${BIN}" "$DIR/"
+          done
+          tar czf "${DIR}.tar.gz" "$DIR"
+          echo "ASSET=${DIR}.tar.gz" >> "$GITHUB_ENV"
 
-      - name: Prepare artifacts (Windows)
+      - name: Package (Windows)
         if: runner.os == 'Windows'
+        shell: pwsh
         run: |
-          mkdir artifacts
-          copy target\${{ matrix.target }}\release\dtek-cli.exe artifacts\dtek-cli-${{ matrix.target }}.exe
-          copy target\${{ matrix.target }}\release\dtek-telegram-bot.exe artifacts\dtek-telegram-bot-${{ matrix.target }}.exe
-          copy target\${{ matrix.target }}\release\dtek-discord-bot.exe artifacts\dtek-discord-bot-${{ matrix.target }}.exe
+          $TAG = "${{ steps.tag.outputs.name }}"
+          $TARGET = "${{ matrix.target }}"
+          $DIR = "dtek-parse-${TAG}-${TARGET}"
+          New-Item -ItemType Directory -Name $DIR
+          foreach ($BIN in @("dtek-cli","dtek-telegram-bot","dtek-discord-bot","dtek-schedule-service")) {
+            Copy-Item "target\${TARGET}\release\${BIN}.exe" "$DIR\"
+          }
+          Compress-Archive -Path "$DIR\*" -DestinationPath "${DIR}.zip"
+          echo "ASSET=${DIR}.zip" | Out-File -FilePath $env:GITHUB_ENV -Append
 
-      - name: Upload artifacts
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: binaries-${{ matrix.target }}
-          path: artifacts/*
+          name: ${{ matrix.target }}
+          path: ${{ env.ASSET }}
 
   release:
     name: Create Release
     needs: build
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-
     steps:
       - uses: actions/checkout@v4
+
+      - name: Determine tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "name=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "name=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -75,8 +125,10 @@ jobs:
           path: artifacts
           merge-multiple: true
 
-      - name: Create Release
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.tag.outputs.name }}
+          name: ${{ steps.tag.outputs.name }}
           generate_release_notes: true
           files: artifacts/*
