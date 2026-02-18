@@ -227,6 +227,29 @@ impl DaySchedule {
         Self::merge_ranges_with(hours, Self::light_start_minute, Self::light_end_minute)
     }
 
+    /// Count total minutes using configurable start/end extractors
+    fn count_minutes_for<F, G>(hours: &[&HourSchedule], start_fn: F, end_fn: G) -> u32
+    where
+        F: Fn(&OutageStatus) -> u16,
+        G: Fn(&OutageStatus) -> u16,
+    {
+        hours
+            .iter()
+            .map(|h| (end_fn(&h.status) - start_fn(&h.status)) as u32)
+            .sum()
+    }
+
+    /// Format a duration in minutes as "Xг" or "Xг Yхв"
+    fn format_duration(minutes: u32) -> String {
+        let h = minutes / 60;
+        let m = minutes % 60;
+        if m == 0 {
+            format!("{}г", h)
+        } else {
+            format!("{}г {}хв", h, m)
+        }
+    }
+
     /// Generic merge function with configurable start/end minute extractors
     fn merge_ranges_with<F, G>(hours: &[&HourSchedule], start_fn: F, end_fn: G) -> Vec<String>
     where
@@ -309,16 +332,28 @@ impl DaySchedule {
         let mut result = format!("📅 {} ({}):\n", self.date, self.day_of_week);
 
         if !on_hours.is_empty() {
+            let light_mins = Self::count_minutes_for(
+                &on_hours,
+                Self::light_start_minute,
+                Self::light_end_minute,
+            );
             result.push_str("  ✅ ");
             let ranges = Self::merge_light_ranges(&on_hours);
             result.push_str(&ranges.join(", "));
+            result.push_str(&format!(" ({})", Self::format_duration(light_mins)));
             result.push('\n');
         }
 
         if !off_hours.is_empty() {
+            let off_mins = Self::count_minutes_for(
+                &off_hours,
+                Self::outage_start_minute,
+                Self::outage_end_minute,
+            );
             result.push_str("  ❌ ");
             let ranges = Self::merge_outage_ranges(&off_hours);
             result.push_str(&ranges.join(", "));
+            result.push_str(&format!(" ({})", Self::format_duration(off_mins)));
             result.push('\n');
         }
 
