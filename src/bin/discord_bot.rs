@@ -6,6 +6,7 @@
 use chrono::{DateTime, Duration, Utc};
 use dtek_parse::{DTEKParser, ScheduleData};
 use poise::serenity_prelude as serenity;
+use serde_json;
 use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
 use sqlx::Row;
 use std::collections::HashMap;
@@ -48,14 +49,54 @@ struct ScheduleCache {
     /// Prevents multiple simultaneous refresh operations
     refresh_in_progress: AtomicBool,
     cache_duration_minutes: i64,
+    /// Optional shared schedule DB (set via SCHEDULE_DB_URL)
+    schedule_db: Option<SqlitePool>,
+}
+
+/// Read all schedules from the shared schedule DB written by dtek-schedule-service
+async fn fetch_from_schedule_db(
+    pool: &SqlitePool,
+) -> anyhow::Result<HashMap<String, ScheduleData>> {
+    let rows = sqlx::query("SELECT group_name, data FROM schedules")
+        .fetch_all(pool)
+        .await?;
+
+    let mut map = HashMap::new();
+    for row in rows {
+        let group_name: String = row.get("group_name");
+        let data: String = row.get("data");
+        let sd: ScheduleData = serde_json::from_str(&data)?;
+        map.insert(group_name, sd);
+    }
+    Ok(map)
 }
 
 impl ScheduleCache {
-    fn new(cache_duration_minutes: i64) -> Self {
+    fn new(cache_duration_minutes: i64, schedule_db: Option<SqlitePool>) -> Self {
         Self {
             data: RwLock::new(HashMap::new()),
             refresh_in_progress: AtomicBool::new(false),
             cache_duration_minutes,
+            schedule_db,
+        }
+    }
+
+    /// Fetch all schedules from external DB (if configured) or DTEK
+    async fn fetch_all(&self) -> Result<HashMap<String, ScheduleData>, Error> {
+        if let Some(ref pool) = self.schedule_db {
+            fetch_from_schedule_db(pool).await.map_err(Into::into)
+        } else {
+            let result = tokio::task::spawn_blocking(|| {
+                let mut parser = DTEKParser::new()?;
+                parser.get_all_schedules()
+            })
+            .await;
+
+            match result {
+                Ok(Ok(schedules)) => Ok(schedules),
+                Ok(Err(e)) => Err(e.into()),
+                Err(e) => Err(format!("Task panicked: {}", e).into()),
+            }
         }
     }
 
@@ -182,23 +223,13 @@ async fn refresh_cache_if_needed(cache: &Arc<ScheduleCache>) {
 
     info!("Starting cache refresh...");
 
-    // Do the actual refresh
-    let result = tokio::task::spawn_blocking(|| {
-        let mut parser = DTEKParser::new()?;
-        parser.get_all_schedules()
-    })
-    .await;
-
-    match result {
-        Ok(Ok(schedules)) => {
-            info!("Fetched {} groups from DTEK", schedules.len());
+    match cache.fetch_all().await {
+        Ok(schedules) => {
+            info!("Fetched {} groups", schedules.len());
             cache.update(schedules).await;
         }
-        Ok(Err(e)) => {
-            error!("Failed to fetch from DTEK: {}", e);
-        }
         Err(e) => {
-            error!("Task panicked: {}", e);
+            error!("Failed to fetch schedules: {}", e);
         }
     }
 
@@ -227,23 +258,13 @@ async fn get_schedule(cache: &Arc<ScheduleCache>, group: &str) -> Result<Schedul
     if cache.try_start_refresh() {
         info!("Starting initial cache load...");
 
-        let result = tokio::task::spawn_blocking(|| {
-            let mut parser = DTEKParser::new()?;
-            parser.get_all_schedules()
-        })
-        .await;
-
-        match result {
-            Ok(Ok(schedules)) => {
+        match cache.fetch_all().await {
+            Ok(schedules) => {
                 cache.update(schedules).await;
-            }
-            Ok(Err(e)) => {
-                cache.finish_refresh();
-                return Err(e.into());
             }
             Err(e) => {
                 cache.finish_refresh();
-                return Err(format!("Task error: {}", e).into());
+                return Err(e);
             }
         }
 
@@ -278,23 +299,13 @@ async fn get_groups(cache: &Arc<ScheduleCache>) -> Result<Vec<String>, Error> {
 
     // Empty cache - need to load
     if cache.try_start_refresh() {
-        let result = tokio::task::spawn_blocking(|| {
-            let mut parser = DTEKParser::new()?;
-            parser.get_all_schedules()
-        })
-        .await;
-
-        match result {
-            Ok(Ok(schedules)) => {
+        match cache.fetch_all().await {
+            Ok(schedules) => {
                 cache.update(schedules).await;
-            }
-            Ok(Err(e)) => {
-                cache.finish_refresh();
-                return Err(e.into());
             }
             Err(e) => {
                 cache.finish_refresh();
-                return Err(format!("Task error: {}", e).into());
+                return Err(e);
             }
         }
 
@@ -473,21 +484,11 @@ async fn dtek_clear_cache(ctx: Context<'_>) -> Result<(), Error> {
 
     // Force refresh
     if ctx.data().cache.try_start_refresh() {
-        let result = tokio::task::spawn_blocking(|| {
-            let mut parser = DTEKParser::new()?;
-            parser.get_all_schedules()
-        })
-        .await;
-
-        match result {
-            Ok(Ok(schedules)) => {
+        match ctx.data().cache.fetch_all().await {
+            Ok(schedules) => {
                 ctx.data().cache.update(schedules).await;
                 ctx.data().cache.finish_refresh();
                 ctx.say("✅ Кеш оновлено").await?;
-            }
-            Ok(Err(e)) => {
-                ctx.data().cache.finish_refresh();
-                ctx.say(format!("❌ Помилка: {}", e)).await?;
             }
             Err(e) => {
                 ctx.data().cache.finish_refresh();
@@ -590,8 +591,20 @@ async fn main() -> Result<(), Error> {
     .execute(&db)
     .await?;
 
+    // Optional external schedule DB
+    let schedule_db = if let Ok(url) = env::var("SCHEDULE_DB_URL") {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(3)
+            .connect(&url)
+            .await?;
+        info!("Using external schedule DB: {}", url);
+        Some(pool)
+    } else {
+        None
+    };
+
     // Cache
-    let cache = Arc::new(ScheduleCache::new(cache_duration));
+    let cache = Arc::new(ScheduleCache::new(cache_duration, schedule_db));
 
     // Pre-warm cache
     info!("Pre-warming cache...");

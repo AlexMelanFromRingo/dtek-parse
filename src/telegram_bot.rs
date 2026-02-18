@@ -15,6 +15,7 @@
 
 use chrono::{DateTime, Duration, Utc};
 use dtek_parse::{DTEKParser, ScheduleData};
+use serde_json;
 use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
 use sqlx::Row;
 use std::collections::HashMap;
@@ -68,6 +69,28 @@ impl CachedSchedules {
 type Cache = Arc<RwLock<Option<CachedSchedules>>>;
 
 // ═══════════════════════════════════════════════════════════════════════════
+// SHARED DB HELPER
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Read all schedules from the shared schedule DB written by dtek-schedule-service
+async fn fetch_from_schedule_db(
+    pool: &SqlitePool,
+) -> anyhow::Result<HashMap<String, ScheduleData>> {
+    let rows = sqlx::query("SELECT group_name, data FROM schedules")
+        .fetch_all(pool)
+        .await?;
+
+    let mut map = HashMap::new();
+    for row in rows {
+        let group_name: String = row.get("group_name");
+        let data: String = row.get("data");
+        let sd: dtek_parse::ScheduleData = serde_json::from_str(&data)?;
+        map.insert(group_name, sd);
+    }
+    Ok(map)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // BOT STATE
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -80,6 +103,8 @@ struct BotState {
     cache: Cache,
     /// Cache duration in minutes
     cache_duration: i64,
+    /// Optional shared schedule DB (set via SCHEDULE_DB_URL)
+    schedule_db: Option<SqlitePool>,
 }
 
 impl BotState {
@@ -127,10 +152,22 @@ impl BotState {
         info!("Database initialized");
         info!("Cache duration: {} minutes", cache_duration);
 
+        let schedule_db = if let Ok(url) = env::var("SCHEDULE_DB_URL") {
+            let pool = SqlitePoolOptions::new()
+                .max_connections(3)
+                .connect(&url)
+                .await?;
+            info!("Using external schedule DB: {}", url);
+            Some(pool)
+        } else {
+            None
+        };
+
         Ok(Self {
             db,
             cache: Arc::new(RwLock::new(None)),
             cache_duration,
+            schedule_db,
         })
     }
 
@@ -157,16 +194,20 @@ impl BotState {
             }
         }
 
-        // Cache miss or expired - fetch from DTEK
-        info!("Fetching all schedules from DTEK (single request)...");
+        // Cache miss or expired - fetch from external DB or DTEK
+        let schedules = if let Some(ref ext_db) = self.schedule_db {
+            info!("Reading schedules from external schedule DB...");
+            fetch_from_schedule_db(ext_db).await?
+        } else {
+            info!("Fetching all schedules from DTEK (single request)...");
+            tokio::task::spawn_blocking(|| {
+                let mut parser = DTEKParser::new()?;
+                parser.get_all_schedules()
+            })
+            .await??
+        };
 
-        let schedules = tokio::task::spawn_blocking(|| {
-            let mut parser = DTEKParser::new()?;
-            parser.get_all_schedules()
-        })
-        .await??;
-
-        info!("Fetched {} groups from DTEK", schedules.len());
+        info!("Fetched {} groups", schedules.len());
 
         // Update cache
         {
@@ -193,11 +234,15 @@ impl BotState {
     async fn refresh_cache(&self) -> anyhow::Result<()> {
         info!("Force refreshing cache...");
 
-        let schedules = tokio::task::spawn_blocking(|| {
-            let mut parser = DTEKParser::new()?;
-            parser.get_all_schedules()
-        })
-        .await??;
+        let schedules = if let Some(ref ext_db) = self.schedule_db {
+            fetch_from_schedule_db(ext_db).await?
+        } else {
+            tokio::task::spawn_blocking(|| {
+                let mut parser = DTEKParser::new()?;
+                parser.get_all_schedules()
+            })
+            .await??
+        };
 
         {
             let mut cache = self.cache.write().await;
